@@ -1,8 +1,18 @@
-!pip install requests telebot groq google-play-scraper
-
-import requests, telebot, time, random
+import requests, telebot, time, random, os, threading
+from flask import Flask
 from groq import Groq
 from google_play_scraper import search, app
+
+# --- FLASK WEB SERVER (Render er jonno baddhotamulok) ---
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def home():
+    return "Bot is Alive and Running 24/7!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
 
 # --- CONFIG ---
 SHEET_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzI5eCCU_Gci6M0jFr5I_Ph48CqUvvP4_nkpngWtjFafVSr_i75yqKX37ZMG4qwG0_V/exec"
@@ -14,25 +24,24 @@ bot = telebot.TeleBot(BOT_TOKEN)
 groq_client = Groq(api_key=GROQ_API_KEY)
 CHAT_ID = None 
 
+# --- AI Email Generator ---
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt):
     if not dev_name or len(dev_name) > 20: dev_name = "Developer"
-    
     prompt = f"""
     {email_prompt}
     
-    Here is the App Data you must use:
+    App Details:
     - App Name: {app_name}
-    - Developer Name: {dev_name}
+    - Developer: {dev_name}
     - Rating: {rating}
     - Installs: {installs}
-    - Description: {description[:300]}
+    - Description: {description[:200]}
     
-    Signature to use at the end:
-    {contact_info}
+    Contact Info to include: {contact_info}
     
     Format EXACTLY like this:
-    SUBJECT: [Your Subject]
-    BODY: [Your Body]
+    SUBJECT: [Subject Line]
+    BODY: [Email Body]
     """
     try:
         chat = groq_client.chat.completions.create(
@@ -45,17 +54,15 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
         return subject, body
     except Exception as e:
         print(f"AI Error: {e}")
-        return f"Collaboration for {app_name}", content
+        return f"Collaboration Proposal for {app_name}", "Please contact us for collaboration."
 
+# --- Scraper & Outreach Engine ---
 def scrape_and_filter(keywords, max_installs, max_rating, contact_info, email_prompt):
     total_leads = 0
     scraped_apps = set()
 
     for kw in keywords:
         if total_leads >= 200: break
-        bot.send_message(CHAT_ID, f"🔍 Searching Keyword: {kw}")
-        print(f"\n--- Searching: {kw} ---")
-        
         try:
             results = search(kw, lang='en', country='us', n_hits=50)
             for r in results:
@@ -71,58 +78,35 @@ def scrape_and_filter(keywords, max_installs, max_rating, contact_info, email_pr
                 installs = int(d.get('minInstalls', 0))
                 email = d.get('developerEmail')
                 
-                # 1. Rating Check
-                if rating > 0 and rating <= max_rating:
-                    # 2. Install & Email Check
-                    if installs <= max_installs and email:
-                        print(f"✅ PASSED: {d['title']} (Rating: {rating}, Installs: {installs})")
-                        bot.send_message(CHAT_ID, f"✨ Lead Found: {d['title']}. Generating Email...")
-                        
-                        # 3. AI Email Gen
-                        subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt)
-                        
-                        # 4. Save to Sheet
-                        requests.post(SHEET_WEB_APP_URL, json={
-                            "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
-                            "email": email, "subject": subject, "body": body, "installs": installs,
-                            "rating": rating, "link": d['url'], "category": d['genre'], 
-                            "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
-                        })
-                        
-                        # 5. Send Email
-                        mail_res = requests.post(EMAIL_WEB_APP_URL, json={"action": "send_email", "to": email, "subject": subject, "body": body})
-                        
-                        if mail_res.text == "Success":
-                            total_leads += 1
-                            bot.send_message(CHAT_ID, f"📧 Email #{total_leads} Sent to: {email}")
-                            
-                            # 6. Wait 1-2 Mins
-                            delay = random.randint(60, 120)
-                            print(f"⏳ Waiting {delay} seconds...")
-                            time.sleep(delay)
-                        else:
-                            print(f"❌ Email Failed: {mail_res.text}")
-                    else:
-                        print(f"❌ Rejected (Installs/Email): {d['title']} (Installs: {installs}, Email: {bool(email)})")
-                else:
-                    print(f"❌ Rejected (Rating): {d['title']} (Rating: {rating})")
+                if rating > 0 and rating <= max_rating and installs <= max_installs and email:
+                    subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt)
                     
+                    requests.post(SHEET_WEB_APP_URL, json={
+                        "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
+                        "email": email, "subject": subject, "body": body, "installs": installs,
+                        "rating": rating, "link": d['url'], "category": d['genre'], 
+                        "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
+                    })
+                    
+                    mail_res = requests.post(EMAIL_WEB_APP_URL, json={"action": "send_email", "to": email, "subject": subject, "body": body})
+                    
+                    if mail_res.text == "Success":
+                        total_leads += 1
+                        bot.send_message(CHAT_ID, f"✅ Lead #{total_leads} Sent: {d['title']}")
+                        time.sleep(random.randint(60, 120))
+            time.sleep(2)
         except Exception as e: 
-            print(f"Search Error: {e}")
+            print(f"Error: {e}")
             continue
-
     bot.send_message(CHAT_ID, f"🎉 Task Finished! Total {total_leads} emails sent.")
 
 @bot.message_handler(commands=['start'])
 def start_process(message):
     global CHAT_ID
     CHAT_ID = message.chat.id
-    bot.reply_to(message, "🚀 Starting System...")
-    
+    bot.reply_to(message, "🚀 Starting Lead Generation...")
     try:
         res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
-        
-        # Data clean kora jate crash na kore
         max_installs = int(str(res['max_installs']).replace(',', '').strip())
         max_rating = float(str(res['max_rating']).strip())
         
@@ -136,5 +120,10 @@ def start_process(message):
     except Exception as e:
         bot.send_message(CHAT_ID, f"❌ System Error: {e}")
 
-print("🤖 Bot running...")
-bot.polling(none_stop=True)
+# --- MAIN EXECUTION ---
+if __name__ == "__main__":
+    # Flask server ke alada thread e chalu kora
+    threading.Thread(target=run_web).start()
+    # Bot ke chalu kora
+    print("🤖 Bot running...")
+    bot.polling(none_stop=True)
