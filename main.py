@@ -2,8 +2,9 @@ import requests, telebot, time, random, os, threading
 from flask import Flask
 from groq import Groq
 from google_play_scraper import search, app
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-# --- FLASK WEB SERVER (Render er jonno baddhotamulok) ---
+# --- FLASK WEB SERVER (Render er jonno) ---
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -22,7 +23,15 @@ GROQ_API_KEY = "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"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 groq_client = Groq(api_key=GROQ_API_KEY)
+
 CHAT_ID = None 
+is_running = False # Automation control korar switch
+
+# --- TELEGRAM KEYBOARD ---
+def get_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton("🚀 Start Automation"), KeyboardButton("🛑 Stop Automation"))
+    return markup
 
 # --- AI Email Generator ---
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt):
@@ -53,19 +62,22 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
         body = content.split("BODY:")[1].strip()
         return subject, body
     except Exception as e:
-        print(f"AI Error: {e}")
         return f"Collaboration Proposal for {app_name}", "Please contact us for collaboration."
 
 # --- Scraper & Outreach Engine ---
 def scrape_and_filter(keywords, max_installs, max_rating, contact_info, email_prompt):
+    global is_running
     total_leads = 0
     scraped_apps = set()
 
     for kw in keywords:
+        if not is_running: break # Stop button chaple loop theke ber hoye jabe
         if total_leads >= 200: break
+        
         try:
             results = search(kw, lang='en', country='us', n_hits=50)
             for r in results:
+                if not is_running: break # Stop check
                 if total_leads >= 200: break
                 if r['appId'] in scraped_apps: continue
                 scraped_apps.add(r['appId'])
@@ -93,18 +105,35 @@ def scrape_and_filter(keywords, max_installs, max_rating, contact_info, email_pr
                     if mail_res.text == "Success":
                         total_leads += 1
                         bot.send_message(CHAT_ID, f"✅ Lead #{total_leads} Sent: {d['title']}")
-                        time.sleep(random.randint(60, 120))
-            time.sleep(2)
+                        
+                        # Delay er majheo stop check korbe
+                        delay = random.randint(60, 120)
+                        for _ in range(delay):
+                            if not is_running: break
+                            time.sleep(1)
+            
+            if is_running: time.sleep(2)
         except Exception as e: 
-            print(f"Error: {e}")
             continue
-    bot.send_message(CHAT_ID, f"🎉 Task Finished! Total {total_leads} emails sent.")
+            
+    if is_running:
+        bot.send_message(CHAT_ID, f"🎉 Task Finished! Total {total_leads} emails sent.", reply_markup=get_keyboard())
+        is_running = False
 
+# --- BOT COMMANDS ---
 @bot.message_handler(commands=['start'])
+@bot.message_handler(func=lambda msg: msg.text == "🚀 Start Automation")
 def start_process(message):
-    global CHAT_ID
+    global CHAT_ID, is_running
     CHAT_ID = message.chat.id
-    bot.reply_to(message, "🚀 Starting Lead Generation...")
+    
+    if is_running:
+        bot.reply_to(message, "⚠️ Automation is already running!", reply_markup=get_keyboard())
+        return
+        
+    is_running = True
+    bot.reply_to(message, "🚀 Starting Lead Generation & Outreach...", reply_markup=get_keyboard())
+    
     try:
         res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
         max_installs = int(str(res['max_installs']).replace(',', '').strip())
@@ -116,14 +145,25 @@ def start_process(message):
         )
         keywords = [k.strip() for k in chat.choices[0].message.content.split(',') if len(k.strip()) > 3]
         
-        scrape_and_filter(keywords, max_installs, max_rating, res['contact_info'], res['email_prompt'])
+        # Threading use kora hoise jate bot Stop command shunte pare
+        threading.Thread(target=scrape_and_filter, args=(keywords, max_installs, max_rating, res['contact_info'], res['email_prompt'])).start()
     except Exception as e:
-        bot.send_message(CHAT_ID, f"❌ System Error: {e}")
+        is_running = False
+        bot.send_message(CHAT_ID, f"❌ System Error: {e}", reply_markup=get_keyboard())
+
+@bot.message_handler(commands=['stop'])
+@bot.message_handler(func=lambda msg: msg.text == "🛑 Stop Automation")
+def stop_process(message):
+    global is_running
+    if not is_running:
+        bot.reply_to(message, "⚠️ Automation is not running right now.", reply_markup=get_keyboard())
+        return
+        
+    is_running = False
+    bot.reply_to(message, "🛑 Stopping automation... Please wait a moment for the current task to finish.", reply_markup=get_keyboard())
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # Flask server ke alada thread e chalu kora
     threading.Thread(target=run_web).start()
-    # Bot ke chalu kora
     print("🤖 Bot running...")
     bot.polling(none_stop=True)
