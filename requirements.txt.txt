@@ -1,0 +1,5 @@
+requests
+telebot
+groq
+google-play-scraper
+flask
