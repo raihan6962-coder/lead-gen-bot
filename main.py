@@ -67,7 +67,7 @@ def parse_time(time_str):
         try: return datetime.strptime(time_str, "%H:%M").strftime("%H:%M")
         except: return None
 
-# --- AI EMAIL GENERATOR ---
+# --- AI EMAIL GENERATOR (DYNAMIC SENDER) ---
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt, sender_email):
     if not dev_name or len(dev_name) > 20: dev_name = "Developer"
     contact_html = contact_info.replace('\n', '<br>')
@@ -103,7 +103,7 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
     except:
         return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
 
-# --- CORE ENGINE ---
+# --- CORE ENGINE (SENDER ROTATION) ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
     global state
     gov_keywords = ['gov', 'government', 'ministry', 'department', 'state', 'council', 'national', 'authority']
@@ -133,6 +133,7 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 while state["status"] == "PAUSED": time.sleep(1)
                 if state["status"] == "IDLE" or state["total_leads"] >= 200: break
                 
+                # --- SENDER ROTATION CHECK ---
                 senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
                 available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
                 
@@ -349,7 +350,7 @@ def handle_messages(message):
     elif text == "📧 Manage Senders":
         senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
         markup = InlineKeyboardMarkup()
-        msg_text = "📋 **Your Senders:**\n\n"
+        msg_text = "📋 *Your Senders:*\n\n"
         if not senders: msg_text += "No senders added yet.\n"
         
         for i, s in enumerate(senders):
@@ -357,7 +358,9 @@ def handle_messages(message):
             markup.add(InlineKeyboardButton(f"🗑️ Delete {s['email']}", callback_data=f"del_{s['email']}"))
             
         markup.add(InlineKeyboardButton("➕ Add New Sender", callback_data="add_new_sender"))
-        bot.reply_to(message, msg_text, parse_mode="Markdown", reply_markup=get_keyboard())
+        
+        # EKHANE FIX KORA HOISE: reply_markup=markup deya hoise
+        bot.reply_to(message, msg_text, parse_mode="Markdown", reply_markup=markup)
 
     elif text == "🚀 Start Automation":
         if state["status"] in ["IDLE", "SCHEDULED"]:
@@ -394,12 +397,14 @@ def handle_messages(message):
             state["status"] = "WAITING_TEST_EMAIL"
             bot.reply_to(message, "📧 Send the email address to receive the test.", reply_markup=get_back_keyboard())
             
-    elif state["status"] == "WAITING_TEST_EMAIL":
-        if "@" in text:
-            state["status"] = "IDLE"
-            threading.Thread(target=run_spam_test, args=(text,)).start()
-        else:
-            bot.reply_to(message, "❌ Invalid email.", reply_markup=get_back_keyboard())
+    else:
+        parsed_time = parse_time(text)
+        if parsed_time:
+            state["status"] = "SCHEDULED"
+            state["scheduled_time"] = parsed_time
+            bot.reply_to(message, f"✅ Scheduled successfully! It will run everyday at {text} (Bangladesh Time).", reply_markup=get_keyboard())
+        elif state["status"] not in ["RUNNING", "PAUSED", "WAITING_TEST_EMAIL"]:
+            bot.reply_to(message, "❌ Invalid command. Please use the keyboard buttons.")
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
