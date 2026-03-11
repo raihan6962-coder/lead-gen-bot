@@ -20,16 +20,20 @@ EMAIL_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwrwh2vi677K1KyI6Xk
 BOT_TOKEN = "8709829378:AAEJJQ8jm_oTyAcGenBrIfLi4KYHRVcSJbo"
 GROQ_API_KEY = "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"
 
+# Ekhane apnar email ta din (Unsubscribe link e eita use hobe)
+SENDER_EMAIL = "aburaihan6963@gmail.com" 
+
 bot = telebot.TeleBot(BOT_TOKEN)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # --- STATE MANAGEMENT ---
 state = {
-    "status": "IDLE", # IDLE, RUNNING, PAUSED, SCHEDULED
+    "status": "IDLE", 
     "keywords": [],
     "current_kw_index": 0,
     "total_leads": 0,
     "scraped_apps": set(),
+    "existing_emails": set(), # Duplicate check er jonno database
     "chat_id": None,
     "scheduled_time": None
 }
@@ -47,7 +51,12 @@ def get_keyboard():
         markup.add(KeyboardButton("❌ Cancel Schedule"))
     return markup
 
-# --- TIME PARSER (AM/PM Support) ---
+def get_schedule_options():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton("✅ Everyday at this time"), KeyboardButton("❌ Cancel Schedule"))
+    return markup
+
+# --- TIME PARSER ---
 def parse_time(time_str):
     time_str = time_str.strip().upper()
     try:
@@ -60,12 +69,9 @@ def parse_time(time_str):
         except ValueError:
             return None
 
-# --- AI EMAIL GENERATOR (HTML FIXED) ---
+# --- AI EMAIL GENERATOR (PERFECT HTML FORMAT) ---
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt):
     if not dev_name or len(dev_name) > 20: dev_name = "Developer"
-    
-    # Format contact info for HTML
-    contact_html = contact_info.replace('\n', '<br>')
     
     prompt = f"""
     {email_prompt}
@@ -73,30 +79,45 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
     App Details: App Name: {app_name}, Developer: {dev_name}, Rating: {rating}, Installs: {installs}
     
     RULES:
-    1. Output ONLY valid HTML for the body. Use <br> for newlines.
-    2. DO NOT use markdown like **bold**. Use <b>bold</b> if needed.
-    3. Include this signature at the end: <br><br>{contact_html}
+    1. Write in plain text with normal paragraphs.
+    2. DO NOT use markdown like **bold** or *italics*.
+    3. Keep it professional and clean.
     
     Format EXACTLY like this:
     SUBJECT: [Subject Line]
-    BODY: [HTML Email Body]
+    BODY: [Email Body]
     """
     try:
         chat = groq_client.chat.completions.create(messages=[{"role": "user", "content": prompt}], model="llama-3.1-8b-instant")
         content = chat.choices[0].message.content
         subject = content.split("SUBJECT:")[1].split("BODY:")[0].strip()
-        body = content.split("BODY:")[1].strip()
+        raw_body = content.split("BODY:")[1].strip()
         
-        # Clean up any accidental markdown
-        body = body.replace('**', '<b>').replace('*', '')
-        if '<br>' not in body: body = body.replace('\n', '<br>')
+        # --- HTML FORMATTER ---
+        # Clean markdown
+        clean_body = raw_body.replace('**', '').replace('*', '')
+        # Convert newlines to HTML breaks
+        clean_body = clean_body.replace('\n\n', '<br><br>').replace('\n', '<br>')
+        # Format contact info
+        contact_html = contact_info.replace('\n', '<br>')
         
-        # Add Centered Unsubscribe Button
-        unsubscribe_html = f"<br><br><hr style='border: 0; border-top: 1px solid #eee;'><div style='text-align: center; padding-top: 10px;'><a href='mailto:unsubscribe@yourdomain.com?subject=Unsubscribe me' style='color: #999; font-size: 12px; text-decoration: underline; font-family: Arial, sans-serif;'>Unsubscribe from future emails</a></div>"
-        body += unsubscribe_html
-        return subject, body
-    except:
-        return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
+        # Final HTML Assembly with Centered Unsubscribe
+        final_html_body = f"""
+        <div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto;">
+            {clean_body}
+            <br><br>
+            {contact_html}
+            <br><br><br>
+            <hr style="border: 0; border-top: 1px solid #eee;">
+            <div style="text-align: center; padding-top: 10px;">
+                <a href="mailto:{SENDER_EMAIL}?subject=Unsubscribe%20Me&body=Please%20remove%20me%20from%20your%20mailing%20list." style="color: #999; font-size: 12px; text-decoration: underline;">Unsubscribe from future emails</a>
+            </div>
+        </div>
+        """
+        return subject, final_html_body
+    except Exception as e:
+        print(f"Email Gen Error: {e}")
+        return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_info}"
 
 # --- CORE ENGINE ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
@@ -112,13 +133,11 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
         bot.send_message(state["chat_id"], f"🔍 Deep Searching Keyword: *{kw}*", parse_mode="Markdown")
         
         try:
-            # 1. Keyword Expansion (To get 100-200+ apps)
             raw_results = search(kw, lang='en', country='us', n_hits=150)
             if len(raw_results) < 100:
                 raw_results += search(kw + " app", lang='en', country='us', n_hits=100)
                 raw_results += search(kw + " free", lang='en', country='us', n_hits=100)
             
-            # Remove duplicates from expanded search
             results = []
             seen = set()
             for r in raw_results:
@@ -146,17 +165,23 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 except: continue
                 
                 dev_name = str(d.get('developer', '')).lower()
-                if any(g in dev_name for g in gov_keywords): continue # Skip Gov apps
+                if any(g in dev_name for g in gov_keywords): continue 
                 
                 rating = float(d.get('score', 0))
                 installs = int(d.get('minInstalls', 0))
-                email = d.get('developerEmail')
+                email = str(d.get('developerEmail', '')).strip().lower()
+                
+                # --- DUPLICATE CHECK ---
+                if email in state["existing_emails"]:
+                    print(f"♻️ Duplicate Skipped: {email}")
+                    continue
                 
                 if rating > 0 and rating <= max_rating and installs <= max_installs and email:
                     bot.send_message(state["chat_id"], f"✨ Qualified Lead Found: *{d['title']}*\nGenerating Email...", parse_mode="Markdown")
                     
                     subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt)
                     
+                    # Save to Sheet
                     requests.post(SHEET_WEB_APP_URL, json={
                         "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
                         "email": email, "subject": subject, "body": body, "installs": installs,
@@ -164,6 +189,10 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                         "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
                     })
                     
+                    # Add to local database to prevent duplicate in same run
+                    state["existing_emails"].add(email)
+                    
+                    # Send Email
                     mail_res = requests.post(EMAIL_WEB_APP_URL, json={"action": "send_email", "to": email, "subject": subject, "body": body})
                     
                     if mail_res.text == "Success":
@@ -195,12 +224,20 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
 def start_engine():
     global state
     try:
+        bot.send_message(state["chat_id"], "🔄 Fetching settings and checking database for duplicates...")
+        
+        # Fetch Settings
         res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
         max_installs = int(str(res['max_installs']).replace(',', '').strip())
         max_rating = float(str(res['max_rating']).strip())
         
+        # Fetch Existing Emails (Duplicate Database)
+        db_res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_existing_emails"}).json()
+        state["existing_emails"] = set(db_res)
+        bot.send_message(state["chat_id"], f"📚 Loaded {len(state['existing_emails'])} existing emails to prevent duplicates.")
+        
         if not state["keywords"]: 
-            bot.send_message(state["chat_id"], "🧠 AI is generating 200 keywords...")
+            bot.send_message(state["chat_id"], "🧠 AI is generating keywords...")
             chat = groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": f"{res['keyword_prompt']} Niche: {res['niche']}. Give me 200 unique broad keywords separated by commas."}],
                 model="llama-3.1-8b-instant",
@@ -222,10 +259,10 @@ def start_engine():
         state["status"] = "IDLE"
         bot.send_message(state["chat_id"], f"❌ System Error: {e}", reply_markup=get_keyboard())
 
-# --- SCHEDULER THREAD (Bangladesh Time) ---
+# --- SCHEDULER THREAD ---
 def run_scheduler():
     global state
-    tz = pytz.timezone('Asia/Dhaka') # Set to Bangladesh Time
+    tz = pytz.timezone('Asia/Dhaka')
     while True:
         if state["status"] == "SCHEDULED" and state["scheduled_time"]:
             now = datetime.now(tz).strftime("%H:%M")
@@ -233,7 +270,7 @@ def run_scheduler():
                 state["status"] = "RUNNING"
                 bot.send_message(state["chat_id"], "⏰ Scheduled Time Reached! Starting Automation...", reply_markup=get_keyboard())
                 start_engine()
-                time.sleep(60) # Prevent double trigger in the same minute
+                time.sleep(60) 
         time.sleep(10)
 
 # --- BOT COMMANDS ---
@@ -279,7 +316,6 @@ def handle_messages(message):
         bot.reply_to(message, "❌ Schedule Cancelled.", reply_markup=get_keyboard())
         
     else:
-        # Check if user sent a time for scheduling
         parsed_time = parse_time(text)
         if parsed_time:
             state["status"] = "SCHEDULED"
