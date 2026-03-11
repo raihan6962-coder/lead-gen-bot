@@ -33,7 +33,7 @@ state = {
     "current_kw_index": 0,
     "total_leads": 0,
     "scraped_apps": set(),
-    "existing_emails": set(), # Duplicate check er jonno database
+    "existing_emails": set(),
     "chat_id": None,
     "scheduled_time": None
 }
@@ -43,6 +43,7 @@ def get_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     if state["status"] == "IDLE":
         markup.add(KeyboardButton("🚀 Start Automation"), KeyboardButton("📅 Schedule Automation"))
+        markup.add(KeyboardButton("🧪 Spam Test")) # Notun Button
     elif state["status"] == "RUNNING":
         markup.add(KeyboardButton("🛑 Stop Automation"))
     elif state["status"] == "PAUSED":
@@ -73,6 +74,8 @@ def parse_time(time_str):
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt):
     if not dev_name or len(dev_name) > 20: dev_name = "Developer"
     
+    contact_html = contact_info.replace('\n', '<br>')
+    
     prompt = f"""
     {email_prompt}
     
@@ -93,15 +96,10 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
         subject = content.split("SUBJECT:")[1].split("BODY:")[0].strip()
         raw_body = content.split("BODY:")[1].strip()
         
-        # --- HTML FORMATTER ---
-        # Clean markdown
+        # Clean markdown and format HTML
         clean_body = raw_body.replace('**', '').replace('*', '')
-        # Convert newlines to HTML breaks
         clean_body = clean_body.replace('\n\n', '<br><br>').replace('\n', '<br>')
-        # Format contact info
-        contact_html = contact_info.replace('\n', '<br>')
         
-        # Final HTML Assembly with Centered Unsubscribe
         final_html_body = f"""
         <div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto;">
             {clean_body}
@@ -117,7 +115,41 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
         return subject, final_html_body
     except Exception as e:
         print(f"Email Gen Error: {e}")
-        return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_info}"
+        return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
+
+# --- SPAM TEST ENGINE ---
+def run_spam_test(test_email):
+    bot.send_message(state["chat_id"], "🔄 Fetching data for Spam Test...")
+    try:
+        res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
+        lead_res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_one_lead"}).json()
+        
+        if lead_res.get("found"):
+            app_name = lead_res["app_name"]
+            dev_name = lead_res["dev_name"]
+            rating = lead_res["rating"]
+            installs = lead_res["installs"]
+            description = "This is a great application that provides excellent value to its users."
+            bot.send_message(state["chat_id"], f"✅ Found lead in sheet: {app_name}. Generating email...")
+        else:
+            app_name = "Demo Finance App"
+            dev_name = "Demo Studio"
+            rating = 4.8
+            installs = 50000
+            description = "A revolutionary app designed to make daily transactions and financial planning easier for everyone."
+            bot.send_message(state["chat_id"], "⚠️ Sheet is empty. Using Demo App data. Generating email...")
+            
+        subject, body = generate_email_content(app_name, dev_name, rating, installs, description, res['contact_info'], res['email_prompt'])
+        
+        mail_res = requests.post(EMAIL_WEB_APP_URL, json={"action": "send_email", "to": test_email, "subject": subject, "body": body})
+        
+        if mail_res.text == "Success":
+            bot.send_message(state["chat_id"], f"✅ Spam Test Email successfully sent to: {test_email}\nCheck your inbox/spam folder!", reply_markup=get_keyboard())
+        else:
+            bot.send_message(state["chat_id"], f"❌ Failed to send test email: {mail_res.text}", reply_markup=get_keyboard())
+            
+    except Exception as e:
+        bot.send_message(state["chat_id"], f"❌ Error during Spam Test: {e}", reply_markup=get_keyboard())
 
 # --- CORE ENGINE ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
@@ -171,7 +203,6 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 installs = int(d.get('minInstalls', 0))
                 email = str(d.get('developerEmail', '')).strip().lower()
                 
-                # --- DUPLICATE CHECK ---
                 if email in state["existing_emails"]:
                     print(f"♻️ Duplicate Skipped: {email}")
                     continue
@@ -181,7 +212,6 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     
                     subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt)
                     
-                    # Save to Sheet
                     requests.post(SHEET_WEB_APP_URL, json={
                         "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
                         "email": email, "subject": subject, "body": body, "installs": installs,
@@ -189,10 +219,8 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                         "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
                     })
                     
-                    # Add to local database to prevent duplicate in same run
                     state["existing_emails"].add(email)
                     
-                    # Send Email
                     mail_res = requests.post(EMAIL_WEB_APP_URL, json={"action": "send_email", "to": email, "subject": subject, "body": body})
                     
                     if mail_res.text == "Success":
@@ -225,13 +253,10 @@ def start_engine():
     global state
     try:
         bot.send_message(state["chat_id"], "🔄 Fetching settings and checking database for duplicates...")
-        
-        # Fetch Settings
         res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
         max_installs = int(str(res['max_installs']).replace(',', '').strip())
         max_rating = float(str(res['max_rating']).strip())
         
-        # Fetch Existing Emails (Duplicate Database)
         db_res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_existing_emails"}).json()
         state["existing_emails"] = set(db_res)
         bot.send_message(state["chat_id"], f"📚 Loaded {len(state['existing_emails'])} existing emails to prevent duplicates.")
@@ -315,14 +340,32 @@ def handle_messages(message):
         state["scheduled_time"] = None
         bot.reply_to(message, "❌ Schedule Cancelled.", reply_markup=get_keyboard())
         
+    elif text == "🧪 Spam Test":
+        if state["status"] == "IDLE":
+            state["status"] = "WAITING_TEST_EMAIL"
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.add(KeyboardButton("❌ Cancel Test"))
+            bot.reply_to(message, "📧 Please send the email address where you want to receive the test email.", reply_markup=markup)
+            
+    elif text == "❌ Cancel Test":
+        state["status"] = "IDLE"
+        bot.reply_to(message, "❌ Spam Test Cancelled.", reply_markup=get_keyboard())
+        
+    elif state["status"] == "WAITING_TEST_EMAIL":
+        if re.match(r"[^@]+@[^@]+\.[^@]+", text):
+            state["status"] = "IDLE"
+            threading.Thread(target=run_spam_test, args=(text,)).start()
+        else:
+            bot.reply_to(message, "❌ Invalid email format. Please send a valid email address or click 'Cancel Test'.")
+            
     else:
         parsed_time = parse_time(text)
         if parsed_time:
             state["status"] = "SCHEDULED"
             state["scheduled_time"] = parsed_time
             bot.reply_to(message, f"✅ Scheduled successfully! It will run everyday at {text} (Bangladesh Time).", reply_markup=get_keyboard())
-        elif state["status"] not in ["RUNNING", "PAUSED"]:
-            bot.reply_to(message, "❌ Invalid command or time format. Please use '02:30 PM' or '14:30'.")
+        elif state["status"] not in ["RUNNING", "PAUSED", "WAITING_TEST_EMAIL"]:
+            bot.reply_to(message, "❌ Invalid command. Please use the keyboard buttons.")
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
