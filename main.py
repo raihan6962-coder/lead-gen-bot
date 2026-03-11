@@ -147,6 +147,7 @@ def safe_float_conversion(value, default=0.0):
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
     global state
     gov_keywords = ['gov', 'government', 'ministry', 'department', 'state', 'council', 'national', 'authority']
+    gov_pattern = r'\b(?:' + '|'.join(gov_keywords) + r')\b'
 
     while state["current_kw_index"] < len(state["keywords"]):
         while state["status"] == "PAUSED": time.sleep(1)
@@ -181,9 +182,10 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
 
             # Counters for filtering steps
             total_apps = len(unique_results)
-            apps_with_email = 0
-            apps_not_government = 0
-            apps_passed_rating_installs = 0
+            no_email = 0
+            duplicate_email = 0
+            government_skip = 0
+            rating_installs_skip = 0
             leads_found = 0
 
             for idx, r in enumerate(unique_results):
@@ -219,80 +221,80 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 # --- FILTER 1: EMAIL CHECK ---
                 email = str(d.get('developerEmail', '')).strip().lower()
                 if not email or email == 'none' or email == 'null':
-                    continue  # no email, skip
-                apps_with_email += 1
-
+                    no_email += 1
+                    continue
                 if email in state["existing_emails"]:
-                    continue  # already sent
+                    duplicate_email += 1
+                    continue
 
                 # --- FILTER 2: GOVERNMENT FILTER ---
                 dev_name = str(d.get('developer', '')).lower()
-                gov_pattern = r'\b(?:' + '|'.join(gov_keywords) + r')\b'
                 if re.search(gov_pattern, dev_name):
+                    government_skip += 1
                     continue
-                apps_not_government += 1
 
                 # --- FILTER 3: RATING & INSTALLS ---
                 rating = safe_float_conversion(d.get('score', 0))
                 installs = safe_int_conversion(d.get('minInstalls', 0))
 
-                # Relaxed conditions
-                installs_limit_passed = (max_installs == 0) or (installs <= max_installs)
-                rating_limit_passed = (max_rating == 0) or (rating <= max_rating)
+                installs_ok = (max_installs == 0) or (installs <= max_installs)
+                rating_ok = (max_rating == 0) or (rating <= max_rating)
                 if rating == 0 and max_rating > 0:
-                    rating_limit_passed = True  # allow apps with no rating
+                    rating_ok = True
 
-                if installs_limit_passed and rating_limit_passed:
-                    apps_passed_rating_installs += 1
+                if not (installs_ok and rating_ok):
+                    rating_installs_skip += 1
+                    continue
 
-                    # --- LEAD PROCESSING ---
-                    bot.send_message(state["chat_id"], f"✨ Lead Found: *{d['title']}*\nGenerating Email...", parse_mode="Markdown")
+                # --- LEAD PROCESSING ---
+                bot.send_message(state["chat_id"], f"✨ Lead Found: *{d['title']}*\nGenerating Email...", parse_mode="Markdown")
 
-                    subject, body = generate_email_content(
-                        d['title'], d.get('developer', 'Developer'), rating, installs,
-                        d.get('description', ''), contact_info, email_prompt,
-                        current_sender['email']
-                    )
+                subject, body = generate_email_content(
+                    d['title'], d.get('developer', 'Developer'), rating, installs,
+                    d.get('description', ''), contact_info, email_prompt,
+                    current_sender['email']
+                )
 
-                    # Save to sheet
-                    try:
-                        requests.post(SHEET_WEB_APP_URL, json={
-                            "action": "save_lead", "app_name": d['title'], "dev_name": d.get('developer', ''),
-                            "email": email, "subject": subject, "body": body, "installs": installs,
-                            "rating": rating, "link": d.get('url', ''), "category": d.get('genre', ''),
-                            "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
-                        })
-                        state["existing_emails"].add(email)
-                    except:
-                        continue
+                # Save to sheet
+                try:
+                    requests.post(SHEET_WEB_APP_URL, json={
+                        "action": "save_lead", "app_name": d['title'], "dev_name": d.get('developer', ''),
+                        "email": email, "subject": subject, "body": body, "installs": installs,
+                        "rating": rating, "link": d.get('url', ''), "category": d.get('genre', ''),
+                        "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
+                    })
+                    state["existing_emails"].add(email)
+                except:
+                    continue
 
-                    # Send email
-                    try:
-                        mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body}, timeout=30)
-                        if mail_res.text == "Success":
-                            requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
-                            state["total_leads"] += 1
-                            leads_found += 1
-                            bot.send_message(
-                                state["chat_id"],
-                                f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*",
-                                parse_mode="Markdown"
-                            )
+                # Send email
+                try:
+                    mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body}, timeout=30)
+                    if mail_res.text == "Success":
+                        requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
+                        state["total_leads"] += 1
+                        leads_found += 1
+                        bot.send_message(
+                            state["chat_id"],
+                            f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*",
+                            parse_mode="Markdown"
+                        )
 
-                            # Random delay between 60-120 seconds
-                            delay = random.randint(60, 120)
-                            for _ in range(delay):
-                                if state["status"] != "RUNNING": break
-                                time.sleep(1)
-                    except:
-                        continue
+                        # Random delay between 60-120 seconds
+                        delay = random.randint(60, 120)
+                        for _ in range(delay):
+                            if state["status"] != "RUNNING": break
+                            time.sleep(1)
+                except:
+                    continue
 
-            # Send summary for this keyword
+            # Send detailed summary for this keyword
             summary = f"📊 *Keyword Summary: {kw}*\n"
             summary += f"• Total apps found: {total_apps}\n"
-            summary += f"• Apps with email: {apps_with_email}\n"
-            summary += f"• Non-government: {apps_not_government}\n"
-            summary += f"• Passed rating/installs: {apps_passed_rating_installs}\n"
+            summary += f"• No email: {no_email}\n"
+            summary += f"• Already sent (duplicate): {duplicate_email}\n"
+            summary += f"• Government filter: {government_skip}\n"
+            summary += f"• Rating/installs filter: {rating_installs_skip}\n"
             summary += f"• Leads sent: {leads_found}\n"
             bot.send_message(state["chat_id"], summary, parse_mode="Markdown")
 
