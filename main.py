@@ -247,6 +247,14 @@ def handle_messages(message):
 if __name__ == "__main__":
     threading.Thread(target=run_web).start()
     threading.Thread(target=run_scheduler).start()
-    print("🤖 Bot running...")
-    bot.polling(none_stop=True)
+    
+    # Error 409 theke bachte Auto-Retry system
+    while True:
+        try:
+            print("🤖 Bot connecting to Telegram...")
+            bot.polling(none_stop=True)
+        except Exception as e:
+            print(f"⚠️ Connection Error (Retrying in 5 seconds): {e}")
+            time.sleep(5)
+
 
