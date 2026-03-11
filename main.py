@@ -25,16 +25,16 @@ ai  = Groq(api_key=GROQ_KEY)
 
 # ─── STATE ───────────────────────────────────────────────────
 state = {
-    "status":         "IDLE",   # IDLE / SCRAPING / FILTERING / EMAILING / PAUSED / SCHEDULED
-    "keywords":       [],
+    "status":         "IDLE",   # IDLE / SCRAPING / FILTERING / EMAILING / PAUSED
+    "keywords":       [],       # current keyword set (list of terms)
     "kw_index":       0,
     "scraped_ids":    set(),    # globally seen appIds
     "total_scraped":  0,
     "total_emailed":  0,
     "chat_id":        None,
-    "scheduled_time": None,
     "tmp_url":        None,
     "tmp_email":      None,
+    "current_set_id": None,     # id of keyword set being processed
 }
 
 GOV = ['gov','government','ministry','department','council',
@@ -45,15 +45,13 @@ def kb():
     m = ReplyKeyboardMarkup(resize_keyboard=True)
     s = state["status"]
     if s == "IDLE":
-        m.add(KeyboardButton("🔍 Phase 1: Scrape"),  KeyboardButton("📊 Phase 2: Filter & Email"))
-        m.add(KeyboardButton("📅 Schedule"),          KeyboardButton("🧪 Spam Test"))
-        m.add(KeyboardButton("📧 Senders"))
+        m.add(KeyboardButton("🚀 Start Automation"))
+        m.add(KeyboardButton("📅 Schedules"),        KeyboardButton("🔑 Keywords"))
+        m.add(KeyboardButton("🧪 Spam Test"),        KeyboardButton("📧 Senders"))
     elif s in ["SCRAPING", "FILTERING", "EMAILING"]:
         m.add(KeyboardButton("🛑 Pause"))
     elif s == "PAUSED":
         m.add(KeyboardButton("▶️ Resume"),  KeyboardButton("⏹️ Reset"))
-    elif s == "SCHEDULED":
-        m.add(KeyboardButton("❌ Cancel Schedule"))
     return m
 
 def back_kb():
@@ -86,18 +84,96 @@ def get_email(d):
     return "", "none"
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE ALL APPS → SAVE RAW TO SHEET
-#  No filtering here. Just collect maximum data.
+#  KEYWORD SET MANAGEMENT (via sheet)
+# ════════════════════════════════════════════════════════════
+def get_keyword_sets():
+    """returns list of {id, set_text, status} sorted by creation"""
+    try:
+        r = requests.post(SHEET_URL, json={"action":"get_keyword_sets"}, timeout=15)
+        return r.json() if isinstance(r.json(), list) else []
+    except: return []
+
+def add_keyword_set(set_text):
+    """add a new pending keyword set"""
+    try:
+        requests.post(SHEET_URL, json={"action":"add_keyword_set", "set":set_text}, timeout=15)
+    except: pass
+
+def delete_keyword_set(set_id):
+    try:
+        requests.post(SHEET_URL, json={"action":"delete_keyword_set", "id":set_id}, timeout=15)
+    except: pass
+
+def mark_keyword_set_used(set_id):
+    """mark set as completed (used)"""
+    try:
+        requests.post(SHEET_URL, json={"action":"mark_keyword_set_used", "id":set_id}, timeout=15)
+    except: pass
+
+def get_next_keyword_set():
+    """return first pending set (id, text) or (None, None)"""
+    sets = get_keyword_sets()
+    for s in sets:
+        if s.get('status') == 'pending':
+            return s.get('id'), s.get('set_text')
+    return None, None
+
+# ════════════════════════════════════════════════════════════
+#  SCHEDULE MANAGEMENT (via sheet)
+# ════════════════════════════════════════════════════════════
+def get_schedule_times():
+    """returns list of schedule times (strings HH:MM)"""
+    try:
+        r = requests.post(SHEET_URL, json={"action":"get_schedule_times"}, timeout=15)
+        return r.json() if isinstance(r.json(), list) else []
+    except: return []
+
+def add_schedule_time(time_str):
+    try:
+        requests.post(SHEET_URL, json={"action":"add_schedule_time", "time":time_str}, timeout=15)
+    except: pass
+
+def delete_schedule_time(time_str):
+    try:
+        requests.post(SHEET_URL, json={"action":"delete_schedule_time", "time":time_str}, timeout=15)
+    except: pass
+
+# ════════════════════════════════════════════════════════════
+#  FULL AUTOMATION: Phase 1 → Phase 2
+# ════════════════════════════════════════════════════════════
+def run_full_automation():
+    """Run Phase 1, then automatically Phase 2 if Phase 1 completes."""
+    # Phase 1
+    phase1_scrape()
+    # After Phase 1, if we are still in SCRAPING (i.e., not paused/interrupted),
+    # we should move to Phase 2. But phase1_scrape sets status to IDLE on completion.
+    # We'll modify phase1_scrape to trigger Phase 2 when it finishes successfully.
+    # So here we just start Phase 1; it will handle the rest.
+    pass
+
+# ════════════════════════════════════════════════════════════
+#  PHASE 1 — SCRAPE ALL APPS USING CURRENT KEYWORD SET
+#  (Modified to auto-start Phase 2 on successful completion)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
     state["status"] = "SCRAPING"
 
     try:
-        # Load settings
-        res          = requests.post(SHEET_URL, json={"action":"get_settings"}, timeout=20).json()
-        niche        = str(res.get('niche','mobile apps'))
-        kw_prompt    = str(res.get('keyword_prompt','Generate Play Store search terms for'))
+        # Get the next pending keyword set from sheet
+        set_id, kw_set = get_next_keyword_set()
+        if not set_id:
+            send("❌ No pending keyword sets. Add some first.")
+            state["status"] = "IDLE"
+            bot.send_message(cid, ".", reply_markup=kb())
+            return
+
+        state["current_set_id"] = set_id
+        state["keywords"] = [kw_set]   # use the whole set as one search phrase
+        state["kw_index"] = 0
+        state["total_scraped"] = 0
+
+        send(f"🔍 Using keyword set: *{kw_set}*")
 
         # Load already scraped IDs from sheet to avoid re-scraping
         try:
@@ -109,39 +185,7 @@ def phase1_scrape():
         send(f"✅ Already in DB: *{len(state['scraped_ids'])}* apps\n"
              f"Will skip these and only scrape new ones.")
 
-        # Generate keywords if needed
-        if not state["keywords"]:
-            send("🧠 Generating keywords with AI...")
-            p = f"""{kw_prompt}
-Niche: {niche}
-Give 200 unique short search terms (2-5 words) someone types in Google Play Store.
-Comma separated ONLY. No 'keywords' word. No numbers. No bullets. No explanation."""
-
-            r = ai.chat.completions.create(
-                messages=[{"role":"user","content":p}],
-                model="llama-3.1-8b-instant",
-                max_tokens=2000
-            )
-            raw = r.choices[0].message.content.replace('\n',',').replace('\r',',')
-            cleaned = []
-            for k in raw.split(','):
-                k = re.sub(r'^\d+[\.\)\-\s]+','',k)
-                k = k.replace('keyword','').replace('**','').replace('*','').replace('#','')
-                k = k.replace('"','').replace("'",'').strip()
-                if 2 < len(k) < 60: cleaned.append(k)
-
-            if not cleaned:
-                send("❌ Keyword generation failed. Try again.")
-                state["status"] = "IDLE"
-                bot.send_message(cid,".", reply_markup=kb())
-                return
-
-            state["keywords"]  = cleaned
-            state["kw_index"]  = 0
-            state["total_scraped"] = 0
-            send(f"✅ *{len(cleaned)} keywords* ready! Starting scrape...")
-
-        # ── Iterate keywords ──────────────────────────────────
+        # ── Iterate keywords (only one in this set) ─────────────────
         while state["kw_index"] < len(state["keywords"]):
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE": break
@@ -246,12 +290,22 @@ Comma separated ONLY. No 'keywords' word. No numbers. No bullets. No explanation
 
             state["kw_index"] += 1
 
-        # Phase 1 complete
-        if state["status"] != "IDLE":
-            send(f"🎉 *Phase 1 Complete!*\n"
-                 f"Total apps scraped: *{state['total_scraped']}*\n"
-                 f"All saved to *Raw Leads* sheet.\n\n"
-                 f"Now press *📊 Phase 2: Filter & Email* to start sending!")
+        # Phase 1 complete – mark keyword set as used
+        if state["status"] != "IDLE" and state["current_set_id"]:
+            mark_keyword_set_used(state["current_set_id"])
+            state["current_set_id"] = None
+            send(f"🎉 *Phase 1 Complete!* Total scraped: *{state['total_scraped']}*")
+
+            # Automatically start Phase 2
+            if state["status"] == "SCRAPING":  # not paused/interrupted
+                send("⏩ Automatically starting Phase 2 (Filter & Email)...")
+                state["status"] = "FILTERING"
+                # Launch Phase 2 in a new thread
+                threading.Thread(target=phase2_filter_and_email, daemon=True).start()
+                return  # exit phase1 thread
+
+        # If we reach here, either paused or idle
+        if state["status"] != "PAUSED":
             state["status"] = "IDLE"
             bot.send_message(cid, ".", reply_markup=kb())
 
@@ -262,11 +316,11 @@ Comma separated ONLY. No 'keywords' word. No numbers. No bullets. No explanation
 
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 2 — FILTER RAW LEADS → QUALIFIED → SEND EMAILS
+#  PHASE 2 — FILTER & EMAIL (unchanged except final message)
 # ════════════════════════════════════════════════════════════
 def phase2_filter_and_email():
     cid = state["chat_id"]
-    state["status"] = "FILTERING"
+    # status already set to FILTERING by caller
 
     try:
         # Load settings
@@ -435,10 +489,12 @@ def phase2_filter_and_email():
                 send(f"❌ Failed to `{email}`: {resp}")
 
         if state["status"] == "EMAILING":
-            send(f"🎉 *Phase 2 Complete!*\n"
+            send(f"🎉 *Full Automation Complete!*\n"
                  f"Total emails sent: *{state['total_emailed']}*")
             state["status"] = "IDLE"
             bot.send_message(cid,".", reply_markup=kb())
+        elif state["status"] == "PAUSED":
+            bot.send_message(cid, "⏸️ Paused during email phase.", reply_markup=kb())
 
     except Exception as e:
         state["status"] = "IDLE"
@@ -446,7 +502,7 @@ def phase2_filter_and_email():
         bot.send_message(cid,".", reply_markup=kb())
 
 
-# ─── PERSONALIZED EMAIL BUILDER ──────────────────────────────
+# ─── PERSONALIZED EMAIL BUILDER (unchanged) ─────────────────
 def build_email(row, contact_info, email_prompt, sender_email):
     app_name    = str(row.get('app_name','Unknown App'))
     dev_name    = str(row.get('dev_name','') or '').strip()
@@ -534,7 +590,7 @@ Dear {dev_name},<br><br>I came across your app <b>{app_name}</b> and would love 
         return f"Quick question about {app_name}", html
 
 
-# ─── SPAM TEST ───────────────────────────────────────────────
+# ─── SPAM TEST (unchanged) ───────────────────────────────────
 def run_spam_test(test_email):
     send("🔄 Running Spam Test...")
     try:
@@ -568,17 +624,18 @@ def run_spam_test(test_email):
         bot.send_message(state["chat_id"],".", reply_markup=kb())
 
 
-# ─── SCHEDULER ───────────────────────────────────────────────
+# ─── SCHEDULER (triggers full automation) ───────────────────
 def run_scheduler():
     tz = pytz.timezone('Asia/Dhaka')
     while True:
         try:
-            if state["status"] == "SCHEDULED" and state["scheduled_time"] and state["chat_id"]:
-                if datetime.now(tz).strftime("%H:%M") == state["scheduled_time"]:
-                    state["status"] = "SCRAPING"
-                    send("⏰ Scheduled! Starting Phase 1...")
-                    bot.send_message(state["chat_id"],".", reply_markup=kb())
+            if state["status"] == "IDLE":
+                now = datetime.now(tz).strftime("%H:%M")
+                times = get_schedule_times()
+                if now in times:
+                    send(f"⏰ Scheduled time *{now}* – starting full automation...")
                     threading.Thread(target=phase1_scrape, daemon=True).start()
+                    # Wait a minute to avoid re-triggering in same minute
                     time.sleep(61)
         except Exception as e:
             print(f"Scheduler: {e}")
@@ -592,8 +649,11 @@ def welcome(message):
     state["status"]  = "IDLE"
     bot.reply_to(message,
         "👋 *Welcome Boss!*\n\n"
-        "*🔍 Phase 1:* Scrape all apps → save to Raw Leads sheet\n"
-        "*📊 Phase 2:* Filter → save Qualified Leads → send emails",
+        "*🚀 Start Automation:* Runs full workflow – scrape + filter + email – using next pending keyword set.\n"
+        "*📅 Schedules:* Set multiple daily run times (automation will start automatically).\n"
+        "*🔑 Keywords:* Add keyword sets like `[crypto wallet] [travel app]` – they are used one by one.\n"
+        "*📧 Senders:* Manage email sender accounts.\n\n"
+        "Use the buttons below.",
         parse_mode="Markdown", reply_markup=kb())
 
 @bot.callback_query_handler(func=lambda c: True)
@@ -616,16 +676,44 @@ def callbacks(call):
         bot.send_message(cid, f"📝 Deploy in Apps Script then send URL:\n\n`{code}`",
             parse_mode="Markdown", reply_markup=back_kb())
         state["status"] = "WAITING_URL"
-    elif d.startswith("del_"):
-        e2 = d.split("del_")[1]
+    elif d.startswith("del_sender_"):
+        e2 = d.split("del_sender_")[1]
         mk = InlineKeyboardMarkup()
-        mk.add(InlineKeyboardButton("✅ Delete", callback_data=f"cfm_{e2}"),
+        mk.add(InlineKeyboardButton("✅ Delete", callback_data=f"cfm_sender_{e2}"),
                InlineKeyboardButton("❌ Cancel", callback_data="cancel"))
-        bot.send_message(cid, f"Delete *{e2}*?", parse_mode="Markdown", reply_markup=mk)
-    elif d.startswith("cfm_"):
-        e2 = d.split("cfm_")[1]
+        bot.send_message(cid, f"Delete sender *{e2}*?", parse_mode="Markdown", reply_markup=mk)
+    elif d.startswith("cfm_sender_"):
+        e2 = d.split("cfm_sender_")[1]
         requests.post(SHEET_URL, json={"action":"delete_sender","email":e2}, timeout=15)
-        bot.send_message(cid, f"🗑️ Deleted *{e2}*", parse_mode="Markdown")
+        bot.send_message(cid, f"🗑️ Deleted sender *{e2}*", parse_mode="Markdown")
+    # Schedule management
+    elif d == "add_schedule":
+        state["status"] = "WAITING_SCHEDULE"
+        bot.send_message(cid, "⏰ Send time (*02:30 PM* or *14:30*)", reply_markup=back_kb())
+    elif d.startswith("del_schedule_"):
+        tm = d.split("del_schedule_")[1]
+        mk = InlineKeyboardMarkup()
+        mk.add(InlineKeyboardButton("✅ Delete", callback_data=f"cfm_schedule_{tm}"),
+               InlineKeyboardButton("❌ Cancel", callback_data="cancel"))
+        bot.send_message(cid, f"Delete schedule *{tm}*?", parse_mode="Markdown", reply_markup=mk)
+    elif d.startswith("cfm_schedule_"):
+        tm = d.split("cfm_schedule_")[1]
+        delete_schedule_time(tm)
+        bot.send_message(cid, f"🗑️ Deleted schedule *{tm}*", parse_mode="Markdown")
+    # Keyword management
+    elif d == "add_keyword":
+        state["status"] = "WAITING_KEYWORD"
+        bot.send_message(cid, "🔑 Send keyword sets like:\n`[crypto wallet] [travel app] [fitness tracker]`\nEach bracket will be one set.", reply_markup=back_kb())
+    elif d.startswith("del_keyword_"):
+        kid = d.split("del_keyword_")[1]
+        mk = InlineKeyboardMarkup()
+        mk.add(InlineKeyboardButton("✅ Delete", callback_data=f"cfm_keyword_{kid}"),
+               InlineKeyboardButton("❌ Cancel", callback_data="cancel"))
+        bot.send_message(cid, f"Delete this keyword set?", parse_mode="Markdown", reply_markup=mk)
+    elif d.startswith("cfm_keyword_"):
+        kid = d.split("cfm_keyword_")[1]
+        delete_keyword_set(kid)
+        bot.send_message(cid, f"🗑️ Deleted keyword set.", parse_mode="Markdown")
     elif d == "cancel":
         bot.send_message(cid,"Cancelled.")
 
@@ -641,6 +729,7 @@ def handle(message):
         bot.reply_to(message,"🔙 Main Menu.", reply_markup=kb())
         return
 
+    # State-based input handling
     if state["status"] == "WAITING_URL":
         if "script.google.com" in text:
             state["tmp_url"] = text
@@ -676,15 +765,30 @@ def handle(message):
             bot.reply_to(message,"❌ Send a number.", reply_markup=back_kb())
         return
 
-    elif state["status"] == "WAITING_TIME":
+    elif state["status"] == "WAITING_SCHEDULE":
         p = parse_time(text)
         if p:
-            state["scheduled_time"] = p
-            state["status"]         = "SCHEDULED"
-            bot.reply_to(message, f"✅ Scheduled at *{p}* daily (Dhaka)!",
+            add_schedule_time(p)
+            bot.reply_to(message, f"✅ Schedule added at *{p}* daily (Dhaka)!",
                 parse_mode="Markdown", reply_markup=kb())
+            state["status"] = "IDLE"
         else:
             bot.reply_to(message,"❌ Format: 02:30 PM or 14:30", reply_markup=back_kb())
+        return
+
+    elif state["status"] == "WAITING_KEYWORD":
+        # Parse brackets: [crypto wallet] [travel app]
+        sets = re.findall(r'\[(.*?)\]', text)
+        if sets:
+            for s in sets:
+                s = s.strip()
+                if s:
+                    add_keyword_set(s)
+            bot.reply_to(message, f"✅ Added {len(sets)} keyword set(s).",
+                parse_mode="Markdown", reply_markup=kb())
+        else:
+            bot.reply_to(message,"❌ No brackets found. Use like: `[crypto wallet]`", reply_markup=back_kb())
+        state["status"] = "IDLE"
         return
 
     elif state["status"] == "WAITING_TEST":
@@ -697,13 +801,9 @@ def handle(message):
         return
 
     # ── Main buttons ──────────────────────────────────────────
-    if text == "🔍 Phase 1: Scrape":
+    if text == "🚀 Start Automation":
         if state["status"] == "IDLE":
             threading.Thread(target=phase1_scrape, daemon=True).start()
-
-    elif text == "📊 Phase 2: Filter & Email":
-        if state["status"] == "IDLE":
-            threading.Thread(target=phase2_filter_and_email, daemon=True).start()
 
     elif text == "🛑 Pause":
         if state["status"] in ["SCRAPING","FILTERING","EMAILING"]:
@@ -714,28 +814,56 @@ def handle(message):
     elif text == "▶️ Resume":
         if state["status"] == "PAUSED":
             # Determine which phase to resume
-            # We store last active phase in status before pausing
-            state["status"] = "EMAILING"  # default resume to email phase
+            # We'll resume to the same phase (SCRAPING/FILTERING/EMAILING) because it's stored
+            # But we need to know which one. We can check keywords or email count.
+            # Simpler: just set status back to the previous phase; the threads are still alive and checking status.
+            # The thread will continue when status becomes not PAUSED.
+            # We need to know what the previous phase was. We can store it separately or just set to SCRAPING if there are keywords left, else EMAILING.
+            # For simplicity, we'll set to SCRAPING if keywords remain, else EMAILING.
+            if state["keywords"] and state["kw_index"] < len(state["keywords"]):
+                state["status"] = "SCRAPING"
+            else:
+                state["status"] = "EMAILING"
             bot.reply_to(message,"▶️ *Resuming...*",
                 parse_mode="Markdown", reply_markup=kb())
 
     elif text == "⏹️ Reset":
         state.update({
             "status":"IDLE","keywords":[],"kw_index":0,
-            "scraped_ids":set(),"total_scraped":0,"total_emailed":0
+            "scraped_ids":set(),"total_scraped":0,"total_emailed":0,
+            "current_set_id": None
         })
         bot.reply_to(message,"⏹️ *Fully reset.*", parse_mode="Markdown", reply_markup=kb())
 
-    elif text == "📅 Schedule":
-        if state["status"] == "IDLE":
-            state["status"] = "WAITING_TIME"
-            bot.reply_to(message,"⏰ Send time (*02:30 PM* or *14:30*)",
-                parse_mode="Markdown", reply_markup=back_kb())
+    elif text == "📅 Schedules":
+        times = get_schedule_times()
+        mk = InlineKeyboardMarkup()
+        txt = "📋 *Scheduled times (Dhaka):*\n\n"
+        if not times:
+            txt += "_None set._\n"
+        else:
+            for t in times:
+                txt += f"• {t}\n"
+                mk.add(InlineKeyboardButton(f"🗑️ {t}", callback_data=f"del_schedule_{t}"))
+        mk.add(InlineKeyboardButton("➕ Add Time", callback_data="add_schedule"))
+        mk.add(InlineKeyboardButton("🔙 Back", callback_data="back"))
+        bot.reply_to(message, txt, parse_mode="Markdown", reply_markup=mk)
 
-    elif text == "❌ Cancel Schedule":
-        state["status"]         = "IDLE"
-        state["scheduled_time"] = None
-        bot.reply_to(message,"❌ Cancelled.", reply_markup=kb())
+    elif text == "🔑 Keywords":
+        sets = get_keyword_sets()
+        mk = InlineKeyboardMarkup()
+        txt = "🔑 *Keyword sets:*\n\n"
+        if not sets:
+            txt += "_None added._\n"
+        else:
+            for s in sets:
+                status_icon = "✅" if s.get('status') == 'used' else "⏳"
+                txt += f"{status_icon} `{s.get('set_text')}`\n"
+                if s.get('status') == 'pending':
+                    mk.add(InlineKeyboardButton(f"🗑️ {s.get('set_text')[:20]}", callback_data=f"del_keyword_{s.get('id')}"))
+        mk.add(InlineKeyboardButton("➕ Add Set", callback_data="add_keyword"))
+        mk.add(InlineKeyboardButton("🔙 Back", callback_data="back"))
+        bot.reply_to(message, txt, parse_mode="Markdown", reply_markup=mk)
 
     elif text == "🧪 Spam Test":
         if state["status"] == "IDLE":
@@ -755,7 +883,7 @@ def handle(message):
         else:
             for i,s in enumerate(senders):
                 txt += f"{i+1}. `{s.get('email')}` — {s.get('sent',0)}/{s.get('limit',0)}\n"
-                mk.add(InlineKeyboardButton(f"🗑️ {s.get('email')}", callback_data=f"del_{s.get('email')}"))
+                mk.add(InlineKeyboardButton(f"🗑️ {s.get('email')}", callback_data=f"del_sender_{s.get('email')}"))
         mk.add(InlineKeyboardButton("➕ Add Sender", callback_data="add_sender"))
         mk.add(InlineKeyboardButton("🔙 Back",       callback_data="back"))
         bot.reply_to(message, txt, parse_mode="Markdown", reply_markup=mk)
