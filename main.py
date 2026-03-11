@@ -116,11 +116,8 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
         bot.send_message(state["chat_id"], f"🔍 Searching Keyword: *{kw}*", parse_mode="Markdown")
         
         try:
-            # AGGRESSIVE SEARCH
+            # Aggressive Search
             raw_results = search(kw, lang='en', country='us', n_hits=200)
-            if len(raw_results) < 50:
-                raw_results += search(kw + " app", lang='en', country='us', n_hits=100)
-                raw_results += search(kw + " free", lang='en', country='us', n_hits=100)
             
             results = []
             seen = set()
@@ -130,22 +127,10 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     results.append(r)
             
             leads_in_this_kw = 0
-            bot.send_message(state["chat_id"], f"📊 Found {len(results)} unique apps. Filtering now...")
             
             for r in results:
                 while state["status"] == "PAUSED": time.sleep(1)
                 if state["status"] == "IDLE" or state["total_leads"] >= 200: break
-                
-                # SENDER CHECK
-                senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
-                available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
-                
-                if not available_senders:
-                    bot.send_message(state["chat_id"], "⚠️ All senders have reached their daily limit! Pausing automation.")
-                    state["status"] = "PAUSED"
-                    break
-                
-                current_sender = available_senders[0] 
                 
                 app_id = r['appId']
                 if app_id in state["scraped_apps"]: continue
@@ -154,19 +139,36 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 try: d = app(app_id)
                 except: continue
                 
-                # FAST FILTER: Email na thakle sathe sathe skip
-                email = str(d.get('developerEmail', '')).strip().lower()
-                if not email or email in state["existing_emails"]: continue
-                
                 dev_name = str(d.get('developer', '')).lower()
                 if any(g in dev_name for g in gov_keywords): continue 
                 
                 rating = float(d.get('score', 0))
                 installs = int(d.get('minInstalls', 0))
+                email = str(d.get('developerEmail', '')).strip().lower()
                 
-                if rating > 0 and rating <= max_rating and installs <= max_installs:
-                    bot.send_message(state["chat_id"], f"✨ Lead Found: *{d['title']}*\nGenerating Email...", parse_mode="Markdown")
+                # --- 1. RATING & INSTALL FILTER ---
+                if rating > 0 and rating <= max_rating and installs <= max_installs and email:
                     
+                    # --- 2. DUPLICATE FILTER ---
+                    if email in state["existing_emails"]:
+                        print(f"♻️ Duplicate Skipped: {email}")
+                        continue
+                    
+                    # --- 3. SENDER LIMIT CHECK ---
+                    senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
+                    available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
+                    
+                    if not available_senders:
+                        bot.send_message(state["chat_id"], "⚠️ All senders have reached their daily limit! Pausing automation.")
+                        state["status"] = "PAUSED"
+                        break
+                    
+                    current_sender = available_senders[0] 
+                    
+                    # --- 4. PERFECT LEAD FOUND (Notify Bot) ---
+                    bot.send_message(state["chat_id"], f"✨ Perfect Lead Found: *{d['title']}*\n(Rating: {rating}, Installs: {installs})\n📧 Generating & Sending Email...", parse_mode="Markdown")
+                    
+                    # --- 5. GENERATE & SEND EMAIL ---
                     subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt, current_sender['email'])
                     
                     requests.post(SHEET_WEB_APP_URL, json={
@@ -186,9 +188,12 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                         bot.send_message(state["chat_id"], f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*", parse_mode="Markdown")
                         
                         delay = random.randint(60, 120)
+                        bot.send_message(state["chat_id"], f"⏳ Waiting {delay}s before next lead...")
                         for _ in range(delay):
                             if state["status"] != "RUNNING": break
                             time.sleep(1)
+                    else:
+                        bot.send_message(state["chat_id"], f"❌ Failed to send email to {email}")
             
             if leads_in_this_kw < 3: bot.send_message(state["chat_id"], f"⚠️ Moving to next keyword...")
                 
@@ -215,14 +220,31 @@ def start_engine():
         if not state["keywords"]: 
             bot.send_message(state["chat_id"], "🧠 AI is generating keywords...")
             chat = groq_client.chat.completions.create(
-                messages=[{"role": "user", "content": f"{res['keyword_prompt']} Niche: {res['niche']}. Give me 200 unique broad keywords separated by commas."}],
+                messages=[{"role": "user", "content": f"{res['keyword_prompt']} Niche: {res['niche']}. Give me 200 unique broad keywords separated by commas. Do not use numbers or bullet points."}],
                 model="llama-3.1-8b-instant",
             )
-            raw_kws = chat.choices[0].message.content.split(',')
-            state["keywords"] = [re.sub(r'^\d+[\.\)]?\s*', '', k).strip() for k in raw_kws if len(k.strip()) > 3]
+            # SUPER KEYWORD CLEANER (Fixes the instant finish bug)
+            raw_text = chat.choices[0].message.content
+            raw_text = raw_text.replace('\n', ',') # Convert newlines to commas
+            raw_kws = raw_text.split(',')
+            
+            cleaned_kws = []
+            for k in raw_kws:
+                k = re.sub(r'^\d+[\.\)]?\s*', '', k).strip() # Remove numbers like "1."
+                k = k.replace('*', '').replace('-', '').strip() # Remove bullets
+                if len(k) > 3: cleaned_kws.append(k)
+                
+            state["keywords"] = cleaned_kws
             state["current_kw_index"] = 0
             state["total_leads"] = 0
             state["scraped_apps"] = set()
+            
+            if not state["keywords"]:
+                bot.send_message(state["chat_id"], "❌ AI failed to generate keywords. Please try again.", reply_markup=get_keyboard())
+                state["status"] = "IDLE"
+                return
+                
+            bot.send_message(state["chat_id"], f"✅ Generated {len(state['keywords'])} clean keywords!")
             
         threading.Thread(target=engine_thread, args=(max_installs, max_rating, res['contact_info'], res['email_prompt'])).start()
     except Exception as e:
