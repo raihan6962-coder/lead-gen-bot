@@ -116,9 +116,11 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
         bot.send_message(state["chat_id"], f"🔍 Searching Keyword: *{kw}*", parse_mode="Markdown")
         
         try:
-            raw_results = search(kw, lang='en', country='us', n_hits=150)
-            if len(raw_results) < 100:
+            # AGGRESSIVE SEARCH
+            raw_results = search(kw, lang='en', country='us', n_hits=200)
+            if len(raw_results) < 50:
                 raw_results += search(kw + " app", lang='en', country='us', n_hits=100)
+                raw_results += search(kw + " free", lang='en', country='us', n_hits=100)
             
             results = []
             seen = set()
@@ -128,18 +130,20 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     results.append(r)
             
             leads_in_this_kw = 0
+            bot.send_message(state["chat_id"], f"📊 Found {len(results)} unique apps. Filtering now...")
             
             for r in results:
                 while state["status"] == "PAUSED": time.sleep(1)
                 if state["status"] == "IDLE" or state["total_leads"] >= 200: break
                 
+                # SENDER CHECK
                 senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
                 available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
                 
                 if not available_senders:
                     bot.send_message(state["chat_id"], "⚠️ All senders have reached their daily limit! Pausing automation.")
                     state["status"] = "PAUSED"
-                    continue
+                    break
                 
                 current_sender = available_senders[0] 
                 
@@ -150,16 +154,17 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 try: d = app(app_id)
                 except: continue
                 
+                # FAST FILTER: Email na thakle sathe sathe skip
+                email = str(d.get('developerEmail', '')).strip().lower()
+                if not email or email in state["existing_emails"]: continue
+                
                 dev_name = str(d.get('developer', '')).lower()
                 if any(g in dev_name for g in gov_keywords): continue 
                 
                 rating = float(d.get('score', 0))
                 installs = int(d.get('minInstalls', 0))
-                email = str(d.get('developerEmail', '')).strip().lower()
                 
-                if email in state["existing_emails"]: continue
-                
-                if rating > 0 and rating <= max_rating and installs <= max_installs and email:
+                if rating > 0 and rating <= max_rating and installs <= max_installs:
                     bot.send_message(state["chat_id"], f"✨ Lead Found: *{d['title']}*\nGenerating Email...", parse_mode="Markdown")
                     
                     subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt, current_sender['email'])
@@ -279,7 +284,6 @@ def send_welcome(message):
 def handle_query(call):
     global state
     
-    # INLINE BACK BUTTON LOGIC
     if call.data == "back_to_main":
         state["status"] = "IDLE"
         bot.send_message(call.message.chat.id, "🔙 Returned to Main Menu.", reply_markup=get_keyboard())
@@ -318,7 +322,6 @@ def handle_messages(message):
     text = message.text
     state["chat_id"] = message.chat.id
 
-    # --- GLOBAL BACK BUTTON ---
     if text == "🔙 Back to Main Menu":
         state["status"] = "IDLE"
         state["temp_sender_url"] = None
@@ -370,7 +373,7 @@ def handle_messages(message):
                 markup.add(InlineKeyboardButton(f"🗑️ Delete {s['email']}", callback_data=f"del_{s['email']}"))
             
         markup.add(InlineKeyboardButton("➕ Add New Sender", callback_data="add_new_sender"))
-        markup.add(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")) # Inline Back Button
+        markup.add(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")) 
         
         bot.reply_to(message, msg_text, parse_mode="Markdown", reply_markup=markup)
 
