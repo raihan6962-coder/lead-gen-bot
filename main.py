@@ -19,9 +19,6 @@ SHEET_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzI5eCCU_Gci6M0jFr5
 BOT_TOKEN = "8709829378:AAEJJQ8jm_oTyAcGenBrIfLi4KYHRVcSJbo"
 GROQ_API_KEY = "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"
 
-# Ekhane apnar email ta din (Unsubscribe link e eita use hobe)
-SENDER_EMAIL = "aburaihan6963@gmail.com" 
-
 bot = telebot.TeleBot(BOT_TOKEN)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -70,7 +67,7 @@ def parse_time(time_str):
         try: return datetime.strptime(time_str, "%H:%M").strftime("%H:%M")
         except: return None
 
-# --- AI EMAIL GENERATOR ---
+# --- AI EMAIL GENERATOR (HTML & PERSONALIZED) ---
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt, sender_email):
     if not dev_name or len(dev_name) > 20: dev_name = "Developer"
     contact_html = contact_info.replace('\n', '<br>')
@@ -114,7 +111,7 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
     except:
         return f"Collaboration for {app_name}", f"Dear {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
 
-# --- CORE ENGINE ---
+# --- CORE ENGINE (BASED ON YOUR WORKING CODE) ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
     global state
     gov_keywords = ['gov', 'government', 'ministry', 'department', 'state', 'council', 'national', 'authority']
@@ -127,31 +124,15 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
         bot.send_message(state["chat_id"], f"🔍 Searching Keyword: *{kw}*", parse_mode="Markdown")
         
         try:
-            # 1. SMART SENDER FETCHING (Loop er baire, jate sheet hang na hoy)
-            senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
-            available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
+            # Apnar working code er moto exact search logic (n_hits barano hoise jate beshi pay)
+            results = search(kw, lang='en', country='us', n_hits=100)
             
-            if not available_senders:
-                bot.send_message(state["chat_id"], "⚠️ All senders have reached their daily limit! Pausing automation.")
-                state["status"] = "PAUSED"
+            if not results:
+                bot.send_message(state["chat_id"], f"⚠️ No apps found for '{kw}'. Moving to next...")
+                state["current_kw_index"] += 1
                 continue
                 
-            current_sender = available_senders[0]
-
-            # 2. AGGRESSIVE SEARCH
-            raw_results = search(kw, lang='en', country='us', n_hits=150)
-            if len(raw_results) < 50:
-                raw_results += search(kw + " app", lang='en', country='us', n_hits=100)
-            
-            results = []
-            seen = set()
-            for r in raw_results:
-                if r['appId'] not in seen:
-                    seen.add(r['appId'])
-                    results.append(r)
-            
             leads_in_this_kw = 0
-            bot.send_message(state["chat_id"], f"📊 Found {len(results)} unique apps. Filtering now...")
             
             for r in results:
                 while state["status"] == "PAUSED": time.sleep(1)
@@ -161,75 +142,77 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 if app_id in state["scraped_apps"]: continue
                 state["scraped_apps"].add(app_id)
                 
-                # ANTI-BAN DELAY (Google jate block na kore)
-                time.sleep(0.3)
-                
-                try: 
+                # AGE APP ER DETAILS NIBE (Apnar working code er asol magic)
+                try:
                     d = app(app_id)
-                except Exception as e: 
-                    print(f"Failed to fetch {app_id}: {e}")
-                    continue
+                except: continue
                 
-                # SAFE PARSING
-                raw_score = d.get('score')
-                rating = float(raw_score) if raw_score is not None else 0.0
+                rating = float(d.get('score', 0))
+                installs = int(d.get('minInstalls', 0))
+                email = d.get('developerEmail')
                 
-                raw_installs = d.get('minInstalls')
-                installs = int(raw_installs) if raw_installs is not None else 0
-                
-                email = str(d.get('developerEmail', '')).strip().lower()
-                
-                # FAST FILTER
-                if not email or email == 'none': 
-                    continue
-                if email in state["existing_emails"]: 
-                    continue
-                
-                dev_name = str(d.get('developer', '')).lower()
-                if any(g in dev_name for g in gov_keywords): 
-                    continue 
-                
-                # STRICT RATING & INSTALL FILTER
-                if rating <= max_rating and installs <= max_installs:
-                    bot.send_message(state["chat_id"], f"✨ Lead Found: *{d['title']}*\n(Rating: {rating}, Installs: {installs})\nGenerating Email...", parse_mode="Markdown")
-                    
-                    subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt, current_sender['email'])
-                    
-                    # Save to Sheet
-                    requests.post(SHEET_WEB_APP_URL, json={
-                        "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
-                        "email": email, "subject": subject, "body": body, "installs": installs,
-                        "rating": rating, "link": d['url'], "category": d['genre'], 
-                        "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
-                    })
-                    state["existing_emails"].add(email)
-                    
-                    # Send Email
-                    mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body})
-                    
-                    if mail_res.text == "Success":
-                        # Update Sender Count
-                        requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
-                        current_sender['sent'] = int(current_sender['sent']) + 1
+                # 1. Rating Check
+                if rating > 0 and rating <= max_rating:
+                    # 2. Install & Email Check
+                    if installs <= max_installs and email:
                         
-                        state["total_leads"] += 1
-                        leads_in_this_kw += 1
-                        bot.send_message(state["chat_id"], f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*", parse_mode="Markdown")
+                        email = str(email).strip().lower()
+                        dev_name = str(d.get('developer', '')).lower()
                         
-                        # Check if sender limit reached during loop
-                        if current_sender['sent'] >= int(current_sender['limit']):
-                            bot.send_message(state["chat_id"], f"🔄 Sender {current_sender['email']} reached limit. Switching sender...")
-                            break # Break inner loop to fetch new sender
+                        # 3. Gov App Check
+                        if any(g in dev_name for g in gov_keywords): continue 
                         
-                        delay = random.randint(60, 120)
-                        bot.send_message(state["chat_id"], f"⏳ Waiting {delay}s before next lead...")
-                        for _ in range(delay):
-                            if state["status"] != "RUNNING": break
-                            time.sleep(1)
-                    else:
-                        bot.send_message(state["chat_id"], f"❌ Failed to send email to {email}")
+                        # 4. Duplicate Check (Database)
+                        if email in state["existing_emails"]:
+                            print(f"♻️ Duplicate Skipped: {email}")
+                            continue
+                        
+                        # 5. Sender Rotation Check
+                        senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
+                        available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
+                        
+                        if not available_senders:
+                            bot.send_message(state["chat_id"], "⚠️ All senders have reached their daily limit! Pausing automation.")
+                            state["status"] = "PAUSED"
+                            break
+                        
+                        current_sender = available_senders[0] 
+                        
+                        # --- PERFECT LEAD FOUND ---
+                        bot.send_message(state["chat_id"], f"✨ Perfect Lead Found: *{d['title']}*\n(Rating: {rating}, Installs: {installs})\n📧 Generating & Sending Email...", parse_mode="Markdown")
+                        
+                        subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt, current_sender['email'])
+                        
+                        # Save to Sheet
+                        requests.post(SHEET_WEB_APP_URL, json={
+                            "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
+                            "email": email, "subject": subject, "body": body, "installs": installs,
+                            "rating": rating, "link": d['url'], "category": d['genre'], 
+                            "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
+                        })
+                        state["existing_emails"].add(email)
+                        
+                        # Send Email
+                        mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body})
+                        
+                        if mail_res.text == "Success":
+                            requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
+                            state["total_leads"] += 1
+                            leads_in_this_kw += 1
+                            bot.send_message(state["chat_id"], f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*", parse_mode="Markdown")
+                            
+                            delay = random.randint(60, 120)
+                            bot.send_message(state["chat_id"], f"⏳ Waiting {delay}s before next lead...")
+                            for _ in range(delay):
+                                if state["status"] != "RUNNING": break
+                                time.sleep(1)
+                        else:
+                            bot.send_message(state["chat_id"], f"❌ Failed to send email to {email}")
             
-            if leads_in_this_kw < 3: bot.send_message(state["chat_id"], f"⚠️ Moving to next keyword...")
+            if leads_in_this_kw < 3: 
+                bot.send_message(state["chat_id"], f"⚠️ Only got {leads_in_this_kw} leads from '{kw}'. Moving to next keyword...")
+            else:
+                bot.send_message(state["chat_id"], f"✅ Finished '{kw}'. Got {leads_in_this_kw} solid leads.")
                 
         except Exception as e: 
             print(f"Error: {e}")
@@ -262,6 +245,7 @@ def start_engine():
             
             cleaned_kws = []
             for k in raw_kws:
+                # Keyword theke faltu word golo kete felbe
                 k = re.sub(r'^\d+[\.\)]?\s*', '', k).strip() 
                 k = k.replace('keywords', '').replace('keyword', '').strip() 
                 if len(k) > 3: cleaned_kws.append(k)
