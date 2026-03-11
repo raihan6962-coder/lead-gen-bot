@@ -6,13 +6,10 @@ from groq import Groq
 from google_play_scraper import search, app
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- FLASK ---
+# --- FLASK WEB SERVER ---
 web_app = Flask(__name__)
-
 @web_app.route('/')
-def home():
-    return "Bot is Alive!"
-
+def home(): return "Bot is Alive and Running 24/7!"
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
@@ -25,65 +22,21 @@ GROQ_API_KEY = "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"
 bot = telebot.TeleBot(BOT_TOKEN)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
+# --- STATE MANAGEMENT ---
 state = {
-    "status": "IDLE",
+    "status": "IDLE", 
     "keywords": [],
     "current_kw_index": 0,
-    # Per-keyword app queue — stores filtered app list for current keyword
-    "current_app_queue": [],
-    "current_app_index": 0,
     "total_leads": 0,
-    "scraped_apps": set(),       # All app IDs ever fetched (global dedup)
-    "existing_emails": set(),    # All emails ever sent (global dedup)
+    "scraped_apps": set(),
+    "existing_emails": set(),
     "chat_id": None,
     "scheduled_time": None,
     "temp_sender_url": None,
     "temp_sender_email": None
 }
 
-# ─────────────────────────────────────────
-# HELPER: Extract best contact email
-# ─────────────────────────────────────────
-def get_best_email(d):
-    """
-    Priority:
-    1. developerEmail
-    2. supportEmail
-    3. Regex extract from developerWebsite / privacyPolicy / developerAddress
-    Returns (email_str, source_label)
-    """
-    for field, label in [('developerEmail', 'dev'), ('supportEmail', 'support')]:
-        val = str(d.get(field, '') or '').strip().lower()
-        if val and '@' in val and '.' in val:
-            return val, label
-
-    for field in ['developerWebsite', 'privacyPolicy', 'developerAddress']:
-        val = str(d.get(field, '') or '')
-        found = re.findall(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', val)
-        if found:
-            return found[0].lower(), 'extracted'
-
-    return '', 'none'
-
-# ─────────────────────────────────────────
-# HELPER: Fetch website text for personalization
-# ─────────────────────────────────────────
-def fetch_website_snippet(url, max_chars=800):
-    """Try to grab some text from developer website for personalization"""
-    if not url or 'http' not in url:
-        return ""
-    try:
-        r = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
-        # Strip HTML tags
-        text = re.sub(r'<[^>]+>', ' ', r.text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text[:max_chars]
-    except:
-        return ""
-
-# ─────────────────────────────────────────
-# KEYBOARDS
-# ─────────────────────────────────────────
+# --- KEYBOARDS ---
 def get_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     if state["status"] == "IDLE":
@@ -102,707 +55,405 @@ def get_back_keyboard():
     markup.add(KeyboardButton("🔙 Back to Main Menu"))
     return markup
 
+def get_schedule_options():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton("✅ Everyday at this time"), KeyboardButton("❌ Cancel Schedule"))
+    return markup
+
 def parse_time(time_str):
     time_str = time_str.strip().upper()
-    try:
-        return datetime.strptime(time_str, "%I:%M %p").strftime("%H:%M")
+    try: return datetime.strptime(time_str, "%I:%M %p").strftime("%H:%M")
     except:
-        try:
-            return datetime.strptime(time_str, "%H:%M").strftime("%H:%M")
-        except:
-            return None
+        try: return datetime.strptime(time_str, "%H:%M").strftime("%H:%M")
+        except: return None
 
-def safe_send(chat_id, msg, parse_mode="Markdown"):
+# --- AI EMAIL GENERATOR ---
+def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt, sender_email):
+    if not dev_name or len(dev_name) > 20: dev_name = "Developer"
+    contact_html = contact_info.replace('\n', '<br>')
+    
+    prompt = f"""
+    {email_prompt}
+    
+    App Details: 
+    - App Name: {app_name}
+    - Developer: {dev_name}
+    - Rating: {rating}
+    - Installs: {installs}
+    
+    RULES:
+    1. You MUST start the email with exactly: "Dear {dev_name},"
+    2. Write in plain text with normal paragraphs. Use <br> for newlines.
+    3. DO NOT use markdown like **bold** or *italics*.
+    
+    Format EXACTLY like this:
+    SUBJECT: [Subject Line]
+    BODY: [Email Body]
+    """
     try:
-        bot.send_message(chat_id, msg, parse_mode=parse_mode)
+        chat = groq_client.chat.completions.create(messages=[{"role": "user", "content": prompt}], model="llama-3.1-8b-instant")
+        content = chat.choices[0].message.content
+        subject = content.split("SUBJECT:")[1].split("BODY:")[0].strip()
+        raw_body = content.split("BODY:")[1].strip()
+        
+        clean_body = raw_body.replace('**', '').replace('*', '').replace('\n\n', '<br><br>').replace('\n', '<br>')
+        
+        final_html_body = f"""
+        <div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto;">
+            {clean_body}<br><br>{contact_html}<br><br><br>
+            <hr style="border: 0; border-top: 1px solid #eee;">
+            <div style="text-align: center; padding-top: 10px;">
+                <a href="mailto:{sender_email}?subject=Unsubscribe%20Me&body=Please%20remove%20me%20from%20your%20mailing%20list." style="color: #999; font-size: 12px; text-decoration: underline;">Unsubscribe from future emails</a>
+            </div>
+        </div>
+        """
+        return subject, final_html_body
     except:
-        try:
-            bot.send_message(chat_id, msg)
-        except:
-            pass
+        return f"Collaboration for {app_name}", f"Dear {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
 
-# ─────────────────────────────────────────
-# STEP 1: SCRAPE — Get maximum apps for a keyword
-# (reversed so worst-rated apps come first)
-# ─────────────────────────────────────────
-def scrape_apps_for_keyword(kw):
-    """
-    Search keyword with 5 variations, deduplicate, reverse order
-    (Play Store returns best apps first — we reverse to get low-rated ones first)
-    Returns list of appId strings
-    """
-    raw = []
-    for query in [kw, f"{kw} app", f"{kw} free", f"best {kw}", f"new {kw}"]:
-        try:
-            batch = search(query, lang='en', country='us', n_hits=100)
-            raw.extend(batch)
-            time.sleep(0.3)
-        except:
-            continue
-
-    seen, results = set(), []
-    for r in raw:
-        if r['appId'] not in seen:
-            seen.add(r['appId'])
-            results.append(r['appId'])
-
-    # Reverse: worst ranked (low rating) apps come first
-    results.reverse()
-    return results
-
-# ─────────────────────────────────────────
-# STEP 2: FILTER — Check one app against criteria
-# ─────────────────────────────────────────
-def filter_app(d, max_rating, max_installs):
-    """
-    Returns (passes: bool, reason: str)
-    """
-    gov_kw = ['gov', 'government', 'ministry', 'department', 'council',
-              'national', 'authority', 'federal', 'municipal']
-
-    dev_lower = str(d.get('developer', '') or '').lower()
-    if any(g in dev_lower for g in gov_kw):
-        return False, "government"
-
-    raw_score = d.get('score')
-    rating = float(raw_score) if raw_score is not None else 0.0
-    if rating > max_rating:
-        return False, f"rating {rating} > {max_rating}"
-
-    raw_inst = d.get('minInstalls') or d.get('realInstalls', 0)
-    installs = int(raw_inst) if raw_inst is not None else 0
-    if installs > max_installs:
-        return False, f"installs {installs:,} > {max_installs:,}"
-
-    email, source = get_best_email(d)
-    if not email:
-        return False, "no email"
-
-    return True, "ok"
-
-# ─────────────────────────────────────────
-# STEP 3: PERSONALIZED EMAIL GENERATOR
-# Uses app description + website for personalization
-# ─────────────────────────────────────────
-def generate_personalized_email(d, contact_info, email_prompt, sender_email):
-    app_name    = str(d.get('title', 'Unknown App'))
-    dev_name    = str(d.get('developer', '') or '').strip()
-    if not dev_name or len(dev_name) < 2 or len(dev_name) > 30:
-        dev_name = "Developer"
-
-    rating      = float(d.get('score') or 0.0)
-    raw_inst    = d.get('minInstalls') or d.get('realInstalls', 0)
-    installs    = int(raw_inst) if raw_inst else 0
-    description = str(d.get('description', '') or '')[:500]   # first 500 chars
-    website_url = str(d.get('developerWebsite', '') or '')
-    genre       = str(d.get('genre', '') or '')
-
-    # Fetch website snippet for extra personalization context
-    website_text = fetch_website_snippet(website_url, max_chars=600) if website_url else ""
-
-    contact_html = str(contact_info).replace('\n', '<br>')
-
-    prompt = f"""{email_prompt}
-
-You are writing a personalized outreach email to an app developer.
-
-App Information:
-- App Name: {app_name}
-- Developer: {dev_name}
-- Category: {genre}
-- Rating: {rating} / 5.0
-- Installs: {installs:,}
-- App Description: {description}
-- Developer Website Info: {website_text if website_text else "Not available"}
-
-YOUR TASK:
-Write a SHORT (3-4 paragraphs), highly personalized email that:
-1. Mentions something SPECIFIC about their app or work (use the description/website info above)
-2. Explains our value proposition clearly
-3. Has a clear call to action
-
-STRICT RULES:
-- Start body with exactly: "Dear {dev_name},"
-- Plain text only — NO markdown like **bold** or *italic*
-- Use <br> for line breaks
-- Do NOT mention their rating or install count in the email
-- Sound human, not robotic
-
-Format EXACTLY (nothing else before or after):
-SUBJECT: [subject line]
-BODY: [email body starting with Dear {dev_name},]"""
-
-    try:
-        chat = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
-            max_tokens=700
-        )
-        content = chat.choices[0].message.content.strip()
-
-        if "SUBJECT:" in content and "BODY:" in content:
-            subject  = content.split("SUBJECT:")[1].split("BODY:")[0].strip()
-            raw_body = content.split("BODY:")[1].strip()
-        else:
-            lines    = content.split('\n')
-            subject  = lines[0].replace("Subject:", "").replace("SUBJECT:", "").strip()
-            raw_body = '\n'.join(lines[1:]).strip()
-
-        clean = raw_body.replace('**','').replace('*','')
-        clean = clean.replace('\n\n','<br><br>').replace('\n','<br>')
-
-        html_body = f"""<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;color:#333;max-width:600px;margin:0 auto;">
-{clean}<br><br>{contact_html}<br><br>
-<hr style="border:0;border-top:1px solid #eee;">
-<div style="text-align:center;padding-top:10px;">
-<a href="mailto:{sender_email}?subject=Unsubscribe%20Me&body=Please%20remove%20me." style="color:#999;font-size:12px;text-decoration:underline;">Unsubscribe</a>
-</div></div>"""
-
-        return subject, html_body
-
-    except Exception as e:
-        print(f"Email gen error: {e}")
-        fallback = f"""<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;color:#333;max-width:600px;margin:0 auto;">
-Dear {dev_name},<br><br>I came across your app "{app_name}" and was genuinely impressed by what you have built. I would love to explore a collaboration opportunity.<br><br>{contact_html}<br><br>
-<hr style="border:0;border-top:1px solid #eee;">
-<div style="text-align:center;padding-top:10px;">
-<a href="mailto:{sender_email}?subject=Unsubscribe%20Me&body=Please%20remove%20me." style="color:#999;font-size:12px;text-decoration:underline;">Unsubscribe</a>
-</div></div>"""
-        return f"Collaboration for {app_name}", fallback
-
-# ─────────────────────────────────────────
-# CORE ENGINE — New flow
-# ─────────────────────────────────────────
+# --- CORE ENGINE ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
     global state
-    cid = state["chat_id"]
-
-    stats = {
-        "no_email": 0, "duplicate": 0,
-        "rating_fail": 0, "install_fail": 0,
-        "gov_skip": 0, "sent": 0
-    }
-
-    # ── Outer loop: iterate keywords ──
+    gov_keywords = ['gov', 'government', 'ministry', 'department', 'state', 'council', 'national', 'authority']
+    
     while state["current_kw_index"] < len(state["keywords"]):
         while state["status"] == "PAUSED": time.sleep(1)
         if state["status"] == "IDLE" or state["total_leads"] >= 200: break
-
+        
         kw = state["keywords"][state["current_kw_index"]]
-
-        # ── If no app queue for this keyword yet, build it ──
-        if not state["current_app_queue"]:
-            safe_send(cid, f"🔍 *Scraping apps for:* `{kw}`\n_(reversed order — low-rated apps first)_")
-            app_ids = scrape_apps_for_keyword(kw)
-
-            # Remove already-scraped global IDs
-            app_ids = [a for a in app_ids if a not in state["scraped_apps"]]
-
-            if not app_ids:
-                safe_send(cid, f"⚠️ No new apps found for `{kw}`. Moving on...")
+        bot.send_message(state["chat_id"], f"🔍 Searching Keyword: *{kw}*", parse_mode="Markdown")
+        
+        try:
+            # Working code er moto simple search
+            results = search(kw, lang='en', country='us', n_hits=150)
+            
+            if not results:
+                bot.send_message(state["chat_id"], f"⚠️ No apps found for '{kw}'. Moving to next...")
                 state["current_kw_index"] += 1
                 continue
-
-            state["current_app_queue"] = app_ids
-            state["current_app_index"] = 0
-            safe_send(cid, f"📦 `{len(app_ids)}` apps queued for `{kw}`. Processing...")
-
-        # ── Inner loop: process app queue ──
-        while state["current_app_index"] < len(state["current_app_queue"]):
-            while state["status"] == "PAUSED": time.sleep(1)
-            if state["status"] == "IDLE" or state["total_leads"] >= 200: break
-
-            app_id = state["current_app_queue"][state["current_app_index"]]
-            state["current_app_index"] += 1
-
-            # Mark globally scraped
-            if app_id in state["scraped_apps"]:
-                continue
-            state["scraped_apps"].add(app_id)
-
-            # Fetch app details
-            try:
-                d = app(app_id)
-            except:
-                continue
-
-            # ── FILTER ──
-            passes, reason = filter_app(d, max_rating, max_installs)
-
-            if not passes:
-                if "rating"   in reason: stats["rating_fail"] += 1
-                elif "install" in reason: stats["install_fail"] += 1
-                elif "email"   in reason: stats["no_email"] += 1
-                elif "govt"    in reason: stats["gov_skip"] += 1
-                continue
-
-            email, email_source = get_best_email(d)
-
-            if email in state["existing_emails"]:
-                stats["duplicate"] += 1
-                continue
-
-            # ── CHECK SENDER ──
-            try:
-                senders   = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}, timeout=15).json()
-                available = [s for s in senders if int(s.get('sent', 0)) < int(s.get('limit', 1))]
-            except:
-                continue
-
-            if not available:
-                safe_send(cid, "⚠️ All senders hit daily limit! Pausing.")
-                state["status"] = "PAUSED"
-                break
-
-            sender    = available[0]
-            app_title = str(d.get('title', 'Unknown'))
-            dev_name  = str(d.get('developer', 'Developer'))
-            rating    = float(d.get('score') or 0.0)
-            raw_inst  = d.get('minInstalls') or d.get('realInstalls', 0)
-            installs  = int(raw_inst) if raw_inst else 0
-
-            email_tag = {"dev": "📧 Dev", "support": "📩 Support", "extracted": "📬 Extracted"}.get(email_source, "📬")
-
-            safe_send(cid,
-                f"✨ *Lead Found!*\n"
-                f"App: *{app_title}*\n"
-                f"Rating: `{rating}` | Installs: `{installs:,}`\n"
-                f"{email_tag} email: `{email}`\n"
-                f"🖊 Building personalized email...")
-
-            # ── GENERATE PERSONALIZED EMAIL ──
-            subject, body = generate_personalized_email(d, contact_info, email_prompt, sender['email'])
-
-            # ── SAVE TO SHEET ──
-            try:
-                requests.post(SHEET_WEB_APP_URL, json={
-                    "action":       "save_lead",
-                    "app_name":     app_title,
-                    "dev_name":     dev_name,
-                    "email":        email,
-                    "email_source": email_source,
-                    "subject":      subject,
-                    "body":         body,
-                    "installs":     installs,
-                    "rating":       rating,
-                    "link":         d.get('url', ''),
-                    "category":     d.get('genre', ''),
-                    "website":      d.get('developerWebsite', ''),
-                    "updated":      str(d.get('updated', ''))
-                }, timeout=15)
-            except:
-                pass
-
-            state["existing_emails"].add(email)
-
-            # ── SEND EMAIL ──
-            try:
-                mail_res  = requests.post(
-                    sender['url'],
-                    json={"action": "send_email", "to": email, "subject": subject, "body": body},
-                    timeout=30
-                )
-                mail_text = mail_res.text.strip()
-            except Exception as me:
-                mail_text = f"Error: {me}"
-
-            if mail_text == "Success":
-                try:
-                    requests.post(SHEET_WEB_APP_URL,
-                        json={"action": "increment_sender", "email": sender['email']},
-                        timeout=15)
-                except:
-                    pass
-
-                state["total_leads"] += 1
-                stats["sent"] += 1
-
-                safe_send(cid,
-                    f"✅ *Lead #{state['total_leads']} Sent!*\n"
-                    f"To: `{email}` ({email_source})\n"
-                    f"Via: {sender['email']}\n"
-                    f"Keyword: `{kw}` | App #{state['current_app_index']}/{len(state['current_app_queue'])}")
-
-                # ── WAIT 1-2 MIN then resume from exact position ──
-                delay = random.randint(60, 120)
-                safe_send(cid, f"⏳ Waiting *{delay}s* then continuing from same keyword...")
-                for _ in range(delay):
-                    if state["status"] != "RUNNING": break
-                    time.sleep(1)
-
+                
+            leads_in_this_kw = 0
+            
+            for r in results:
+                while state["status"] == "PAUSED": time.sleep(1)
+                if state["status"] == "IDLE" or state["total_leads"] >= 200: break
+                
+                app_id = r['appId']
+                if app_id in state["scraped_apps"]: continue
+                state["scraped_apps"].add(app_id)
+                
+                try: d = app(app_id)
+                except: continue
+                
+                # Safe Parsing
+                raw_score = d.get('score')
+                rating = float(raw_score) if raw_score is not None else 0.0
+                
+                raw_installs = d.get('minInstalls')
+                installs = int(raw_installs) if raw_installs is not None else 0
+                
+                email = str(d.get('developerEmail', '')).strip().lower()
+                
+                # 1. Fast Filter: Email na thakle ba duplicate hole skip
+                if not email or email == 'none' or email in state["existing_emails"]: continue
+                
+                dev_name = str(d.get('developer', '')).lower()
+                if any(g in dev_name for g in gov_keywords): continue 
+                
+                # 2. Main Filter: Rating & Installs
+                if rating <= max_rating and installs <= max_installs:
+                    
+                    # 3. SENDER CHECK (Eita ekhon filter pass korar por hobe, jate bot fast thake)
+                    try:
+                        senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
+                        available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
+                    except:
+                        continue
+                    
+                    if not available_senders:
+                        bot.send_message(state["chat_id"], "⚠️ All senders have reached their daily limit! Pausing automation.")
+                        state["status"] = "PAUSED"
+                        break
+                    
+                    current_sender = available_senders[0] 
+                    
+                    bot.send_message(state["chat_id"], f"✨ Lead Found: *{d['title']}*\n(Rating: {rating}, Installs: {installs})\nGenerating Email...", parse_mode="Markdown")
+                    
+                    subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt, current_sender['email'])
+                    
+                    requests.post(SHEET_WEB_APP_URL, json={
+                        "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
+                        "email": email, "subject": subject, "body": body, "installs": installs,
+                        "rating": rating, "link": d['url'], "category": d['genre'], 
+                        "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
+                    })
+                    state["existing_emails"].add(email)
+                    
+                    mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body})
+                    
+                    if mail_res.text == "Success":
+                        requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
+                        state["total_leads"] += 1
+                        leads_in_this_kw += 1
+                        bot.send_message(state["chat_id"], f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*", parse_mode="Markdown")
+                        
+                        delay = random.randint(60, 120)
+                        bot.send_message(state["chat_id"], f"⏳ Waiting {delay}s before next lead...")
+                        for _ in range(delay):
+                            if state["status"] != "RUNNING": break
+                            time.sleep(1)
+                    else:
+                        bot.send_message(state["chat_id"], f"❌ Failed to send email to {email}")
+            
+            if leads_in_this_kw < 3: 
+                bot.send_message(state["chat_id"], f"⚠️ Only got {leads_in_this_kw} leads from '{kw}'. Moving to next keyword...")
             else:
-                safe_send(cid, f"❌ Send failed to `{email}`: {mail_text}")
+                bot.send_message(state["chat_id"], f"✅ Finished '{kw}'. Got {leads_in_this_kw} solid leads.")
+                
+        except Exception as e: 
+            print(f"Error: {e}")
+        
+        if state["status"] == "RUNNING": state["current_kw_index"] += 1
 
-        # End of app queue for this keyword
-        if state["status"] == "RUNNING":
-            safe_send(cid,
-                f"📌 *Done with keyword* `{kw}`\n"
-                f"Apps processed: {state['current_app_index']}\n"
-                f"Leads sent: {stats['sent']} | No email: {stats['no_email']}\n"
-                f"Rating fail: {stats['rating_fail']} | Install fail: {stats['install_fail']}")
-
-            # Reset queue and move to next keyword
-            state["current_app_queue"] = []
-            state["current_app_index"] = 0
-            state["current_kw_index"] += 1
-
-    # ── Finished all keywords ──
     if state["status"] == "RUNNING":
-        safe_send(cid,
-            f"🎉 *Automation Complete!*\n"
-            f"Total leads sent: *{state['total_leads']}*\n"
-            f"No email: {stats['no_email']} | Duplicate: {stats['duplicate']}\n"
-            f"Rating fail: {stats['rating_fail']} | Install fail: {stats['install_fail']}")
+        bot.send_message(state["chat_id"], f"🎉 Automation Finished! Total {state['total_leads']} emails sent.", reply_markup=get_keyboard())
         state["status"] = "IDLE"
-        bot.send_message(cid, "✅ Done!", reply_markup=get_keyboard())
 
-
-# ─────────────────────────────────────────
-# START ENGINE
-# ─────────────────────────────────────────
 def start_engine():
     global state
-    cid = state["chat_id"]
     try:
-        safe_send(cid, "🔄 Fetching settings from Sheet...")
-
-        res          = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}, timeout=20).json()
-        max_installs = int(str(res.get('max_installs', '100000')).replace(',', '').strip())
-        max_rating   = float(str(res.get('max_rating', '4.5')).strip())
-        contact_info = str(res.get('contact_info', ''))
-        email_prompt = str(res.get('email_prompt', 'Write a professional collaboration email.'))
-        niche        = str(res.get('niche', 'mobile apps'))
-        kw_prompt    = str(res.get('keyword_prompt', 'Generate Play Store search terms for'))
-
-        try:
-            db = requests.post(SHEET_WEB_APP_URL, json={"action": "get_existing_emails"}, timeout=20).json()
-            state["existing_emails"] = set(db) if isinstance(db, list) else set()
-        except:
-            state["existing_emails"] = set()
-
-        safe_send(cid,
-            f"✅ *Settings loaded*\n"
-            f"Target: Rating ≤ `{max_rating}` | Installs ≤ `{max_installs:,}`\n"
-            f"DB emails: `{len(state['existing_emails'])}`")
-
-        # Generate keywords only if starting fresh
-        if not state["keywords"]:
-            safe_send(cid, "🧠 AI generating keywords...")
-
-            prompt = f"""{kw_prompt}
-Niche: {niche}
-
-Give me 200 unique short search terms (2-4 words) someone types in Google Play Store.
-Rules:
-- Comma separated ONLY
-- NO word 'keywords'
-- NO numbers, bullets, explanations
-- Just the comma-separated list"""
-
+        bot.send_message(state["chat_id"], "🔄 Fetching settings and checking database...")
+        res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
+        max_installs = int(str(res['max_installs']).replace(',', '').strip())
+        max_rating = float(str(res['max_rating']).strip())
+        
+        db_res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_existing_emails"}).json()
+        state["existing_emails"] = set(db_res)
+        
+        if not state["keywords"]: 
+            bot.send_message(state["chat_id"], "🧠 AI is generating keywords...")
+            
             chat = groq_client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": f"{res['keyword_prompt']} Niche: {res['niche']}. Give me 200 unique broad search terms separated by commas. DO NOT use the word 'keywords' or 'keyword' in your response. DO NOT use numbers or bullet points."}],
                 model="llama-3.1-8b-instant",
-                max_tokens=2000
             )
-
-            raw = chat.choices[0].message.content.replace('\n',',').replace('\r',',')
-            cleaned = []
-            for k in raw.split(','):
-                k = re.sub(r'^\d+[\.\)\-\s]+', '', k)
-                k = k.replace('keyword','').replace('**','').replace('*','').replace('#','')
-                k = k.replace('"','').replace("'",'').strip()
-                if 2 < len(k) < 60:
-                    cleaned.append(k)
-
-            if not cleaned:
-                safe_send(cid, "❌ Keyword generation failed. Try again.")
-                state["status"] = "IDLE"
-                bot.send_message(cid, ".", reply_markup=get_keyboard())
-                return
-
-            state["keywords"]          = cleaned
-            state["current_kw_index"]  = 0
-            state["current_app_queue"] = []
-            state["current_app_index"] = 0
-            state["total_leads"]       = 0
-            state["scraped_apps"]      = set()
-
-            safe_send(cid, f"✅ *{len(cleaned)} keywords* ready!\nStarting scrape (reversed order — low rating first)...")
-
-        threading.Thread(
-            target=engine_thread,
-            args=(max_installs, max_rating, contact_info, email_prompt),
-            daemon=True
-        ).start()
-
+            raw_kws = chat.choices[0].message.content.split(',')
+            
+            cleaned_kws = []
+            for k in raw_kws:
+                k = re.sub(r'^\d+[\.\)]?\s*', '', k).strip() 
+                k = k.replace('keywords', '').replace('keyword', '').strip() 
+                if len(k) > 3: cleaned_kws.append(k)
+                
+            state["keywords"] = cleaned_kws
+            state["current_kw_index"] = 0
+            state["total_leads"] = 0
+            state["scraped_apps"] = set()
+            
+            bot.send_message(state["chat_id"], f"✅ Generated {len(state['keywords'])} clean keywords!")
+            
+        threading.Thread(target=engine_thread, args=(max_installs, max_rating, res['contact_info'], res['email_prompt'])).start()
     except Exception as e:
         state["status"] = "IDLE"
-        safe_send(cid, f"❌ Error: {e}")
-        bot.send_message(cid, ".", reply_markup=get_keyboard())
+        bot.send_message(state["chat_id"], f"❌ System Error: {e}", reply_markup=get_keyboard())
 
-
-# ─────────────────────────────────────────
-# SPAM TEST
-# ─────────────────────────────────────────
 def run_spam_test(test_email):
-    cid = state["chat_id"]
-    safe_send(cid, "🔄 Running Spam Test...")
+    bot.send_message(state["chat_id"], "🔄 Fetching data for Spam Test...")
     try:
-        senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}, timeout=15).json()
+        senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
         if not senders:
-            safe_send(cid, "❌ No senders added!")
-            bot.send_message(cid, ".", reply_markup=get_keyboard())
+            bot.send_message(state["chat_id"], "❌ No senders added! Please add a sender first.", reply_markup=get_keyboard())
             return
-
-        sender = senders[0]
-        res    = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}, timeout=15).json()
-
-        # Build a fake app dict for test
-        fake_d = {
-            'title': 'Demo Budget App',
-            'developer': 'Demo Studio',
-            'score': 3.2,
-            'minInstalls': 5000,
-            'description': 'A simple budget tracking app to help users manage daily expenses and savings goals.',
-            'developerWebsite': '',
-            'genre': 'Finance',
-            'developerEmail': test_email,
-            'url': ''
-        }
-
-        subject, body = generate_personalized_email(
-            fake_d,
-            str(res.get('contact_info', '')),
-            str(res.get('email_prompt', 'Write a professional collaboration email.')),
-            sender['email']
-        )
-
-        mail_res = requests.post(
-            sender['url'],
-            json={"action": "send_email", "to": test_email, "subject": subject, "body": body},
-            timeout=30
-        )
-
-        if mail_res.text.strip() == "Success":
-            safe_send(cid, f"✅ Test email sent to `{test_email}`\nVia: {sender['email']}")
+        sender = senders[0] 
+        
+        res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
+        lead_res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_one_lead"}).json()
+        
+        if lead_res.get("found"):
+            app_name, dev_name, rating, installs = lead_res["app_name"], lead_res["dev_name"], lead_res["rating"], lead_res["installs"]
+            description = "This is a great application that provides excellent value to its users."
         else:
-            safe_send(cid, f"❌ Failed: {mail_res.text}")
-
-        bot.send_message(cid, ".", reply_markup=get_keyboard())
-
+            app_name, dev_name, rating, installs = "Demo Finance App", "Demo Studio", 4.8, 50000
+            description = "A revolutionary app designed to make daily transactions easier."
+            
+        subject, body = generate_email_content(app_name, dev_name, rating, installs, description, res['contact_info'], res['email_prompt'], sender['email'])
+        mail_res = requests.post(sender['url'], json={"action": "send_email", "to": test_email, "subject": subject, "body": body})
+        
+        if mail_res.text == "Success":
+            bot.send_message(state["chat_id"], f"✅ Spam Test Email sent to: {test_email}\n*(Sent via: {sender['email']})*", parse_mode="Markdown", reply_markup=get_keyboard())
+        else:
+            bot.send_message(state["chat_id"], f"❌ Failed: {mail_res.text}", reply_markup=get_keyboard())
     except Exception as e:
-        safe_send(cid, f"❌ Error: {e}")
-        bot.send_message(cid, ".", reply_markup=get_keyboard())
+        bot.send_message(state["chat_id"], f"❌ Error: {e}", reply_markup=get_keyboard())
 
-
-# ─────────────────────────────────────────
-# SCHEDULER
-# ─────────────────────────────────────────
+# --- SCHEDULER THREAD ---
 def run_scheduler():
+    global state
     tz = pytz.timezone('Asia/Dhaka')
     while True:
-        try:
-            if state["status"] == "SCHEDULED" and state["scheduled_time"] and state["chat_id"]:
-                if datetime.now(tz).strftime("%H:%M") == state["scheduled_time"]:
-                    state["status"] = "RUNNING"
-                    safe_send(state["chat_id"], "⏰ Scheduled time! Starting...")
-                    bot.send_message(state["chat_id"], ".", reply_markup=get_keyboard())
-                    start_engine()
-                    time.sleep(61)
-        except Exception as e:
-            print(f"Scheduler: {e}")
+        if state["status"] == "SCHEDULED" and state["scheduled_time"]:
+            now = datetime.now(tz).strftime("%H:%M")
+            if now == state["scheduled_time"]:
+                state["status"] = "RUNNING"
+                bot.send_message(state["chat_id"], "⏰ Scheduled Time Reached! Starting Automation...", reply_markup=get_keyboard())
+                start_engine()
+                time.sleep(60) 
         time.sleep(10)
 
-
-# ─────────────────────────────────────────
-# BOT HANDLERS
-# ─────────────────────────────────────────
+# --- BOT COMMANDS & CALLBACKS ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    global state
     state["chat_id"] = message.chat.id
-    state["status"]  = "IDLE"
-    bot.reply_to(message, "👋 *Welcome Boss!*", parse_mode="Markdown", reply_markup=get_keyboard())
-
+    state["status"] = "IDLE"
+    bot.reply_to(message, "👋 Welcome Boss! What would you like to do?", reply_markup=get_keyboard())
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
-    cid = call.message.chat.id
-
+    global state
+    
     if call.data == "back_to_main":
         state["status"] = "IDLE"
-        bot.send_message(cid, "🔙 Main Menu.", reply_markup=get_keyboard())
+        bot.send_message(call.message.chat.id, "🔙 Returned to Main Menu.", reply_markup=get_keyboard())
+        return
 
-    elif call.data == "add_new_sender":
-        code = """function doPost(e) {
+    if call.data == "add_new_sender":
+        script_code = """function doPost(e) {
   var data = JSON.parse(e.postData.contents);
   if (data.action == "send_email") {
     try {
       GmailApp.sendEmail(data.to, data.subject, "", {htmlBody: data.body});
       return ContentService.createTextOutput("Success");
-    } catch(err) {
-      return ContentService.createTextOutput("Error: " + err);
-    }
+    } catch (error) { return ContentService.createTextOutput("Error: " + error.toString()); }
   }
 }"""
-        bot.send_message(cid, f"📝 Deploy this in Apps Script then send URL:\n\n`{code}`",
-            parse_mode="Markdown", reply_markup=get_back_keyboard())
+        bot.send_message(call.message.chat.id, f"📝 **Deploy this code in your new Email's Apps Script:**\n\n`{script_code}`\n\nAfter deploying, please send me the **Web App URL**.", parse_mode="Markdown", reply_markup=get_back_keyboard())
         state["status"] = "WAITING_SENDER_URL"
-
+        
     elif call.data.startswith("del_"):
-        etd = call.data.split("del_")[1]
-        mk  = InlineKeyboardMarkup()
-        mk.add(InlineKeyboardButton("✅ Delete", callback_data=f"confirm_del_{etd}"),
-               InlineKeyboardButton("❌ Cancel",  callback_data="cancel_del"))
-        bot.send_message(cid, f"Delete *{etd}*?", parse_mode="Markdown", reply_markup=mk)
-
+        email_to_del = call.data.split("del_")[1]
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("✅ Allow", callback_data=f"confirm_del_{email_to_del}"), InlineKeyboardButton("❌ Not Now", callback_data="cancel_del"))
+        bot.send_message(call.message.chat.id, f"Are you sure you want to delete {email_to_del}?", reply_markup=markup)
+        
     elif call.data.startswith("confirm_del_"):
-        etd = call.data.split("confirm_del_")[1]
-        requests.post(SHEET_WEB_APP_URL, json={"action": "delete_sender", "email": etd}, timeout=15)
-        bot.send_message(cid, f"🗑️ Deleted *{etd}*", parse_mode="Markdown")
-
+        email_to_del = call.data.split("confirm_del_")[1]
+        requests.post(SHEET_WEB_APP_URL, json={"action": "delete_sender", "email": email_to_del})
+        bot.send_message(call.message.chat.id, f"🗑️ Deleted {email_to_del} successfully!")
+        
     elif call.data == "cancel_del":
-        bot.send_message(cid, "Cancelled.")
-
+        bot.send_message(call.message.chat.id, "❌ Deletion cancelled.")
 
 @bot.message_handler(func=lambda msg: True)
 def handle_messages(message):
-    text = message.text.strip()
+    global state
+    text = message.text
     state["chat_id"] = message.chat.id
 
     if text == "🔙 Back to Main Menu":
         state["status"] = "IDLE"
-        state["temp_sender_url"]   = None
+        state["temp_sender_url"] = None
         state["temp_sender_email"] = None
-        bot.reply_to(message, "🔙 Main Menu.", reply_markup=get_keyboard())
+        bot.reply_to(message, "🔙 Returned to Main Menu.", reply_markup=get_keyboard())
         return
 
-    # ── Sender setup flow ──
     if state["status"] == "WAITING_SENDER_URL":
         if "script.google.com" in text:
             state["temp_sender_url"] = text
             state["status"] = "WAITING_SENDER_EMAIL"
-            bot.reply_to(message, "✅ URL saved! Send *email address*.", parse_mode="Markdown", reply_markup=get_back_keyboard())
+            bot.reply_to(message, "✅ URL received. Now, what is the **Email Address** for this sender?", parse_mode="Markdown", reply_markup=get_back_keyboard())
         else:
-            bot.reply_to(message, "❌ Invalid URL.", reply_markup=get_back_keyboard())
-        return
-
+            bot.reply_to(message, "❌ Invalid URL. Please send a valid Google Apps Script URL.", reply_markup=get_back_keyboard())
+            
     elif state["status"] == "WAITING_SENDER_EMAIL":
         if "@" in text:
             state["temp_sender_email"] = text
             state["status"] = "WAITING_SENDER_LIMIT"
-            bot.reply_to(message, "✅ Email saved! Send *daily limit* (e.g. 20).", parse_mode="Markdown", reply_markup=get_back_keyboard())
+            bot.reply_to(message, "✅ Email received. What is the **Daily Sending Limit** for this email? (e.g., 20)", parse_mode="Markdown", reply_markup=get_back_keyboard())
         else:
-            bot.reply_to(message, "❌ Invalid email.", reply_markup=get_back_keyboard())
-        return
-
+            bot.reply_to(message, "❌ Invalid Email. Try again.", reply_markup=get_back_keyboard())
+            
     elif state["status"] == "WAITING_SENDER_LIMIT":
         if text.isdigit():
             requests.post(SHEET_WEB_APP_URL, json={
-                "action": "add_sender",
-                "email":  state["temp_sender_email"],
-                "url":    state["temp_sender_url"],
-                "limit":  int(text)
-            }, timeout=15)
-            bot.reply_to(message, f"🎉 Sender *{state['temp_sender_email']}* added! {text}/day",
-                parse_mode="Markdown", reply_markup=get_keyboard())
+                "action": "add_sender", "email": state["temp_sender_email"], 
+                "url": state["temp_sender_url"], "limit": int(text)
+            })
+            bot.reply_to(message, f"🎉 Sender {state['temp_sender_email']} added successfully with limit {text}!", reply_markup=get_keyboard())
             state["status"] = "IDLE"
-            state["temp_sender_url"]   = None
-            state["temp_sender_email"] = None
         else:
-            bot.reply_to(message, "❌ Send a number.", reply_markup=get_back_keyboard())
-        return
+            bot.reply_to(message, "❌ Please send a valid number.", reply_markup=get_back_keyboard())
 
-    elif state["status"] == "WAITING_TIME":
-        parsed = parse_time(text)
-        if parsed:
-            state["scheduled_time"] = parsed
-            state["status"] = "SCHEDULED"
-            bot.reply_to(message, f"✅ Scheduled at *{parsed}* daily!", parse_mode="Markdown", reply_markup=get_keyboard())
-        else:
-            bot.reply_to(message, "❌ Format: 02:30 PM or 14:30", reply_markup=get_back_keyboard())
-        return
-
-    elif state["status"] == "WAITING_TEST_EMAIL":
-        if "@" in text:
-            state["status"] = "IDLE"
-            bot.reply_to(message, f"Sending test to *{text}*...", parse_mode="Markdown")
-            threading.Thread(target=run_spam_test, args=(text,), daemon=True).start()
-        else:
-            bot.reply_to(message, "❌ Invalid email.", reply_markup=get_back_keyboard())
-        return
-
-    # ── Main menu buttons ──
-    if text == "📧 Manage Senders":
+    elif text == "📧 Manage Senders":
         try:
-            senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}, timeout=15).json()
+            senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
         except:
-            bot.reply_to(message, "❌ Cannot connect to Sheet.", reply_markup=get_keyboard())
+            bot.reply_to(message, "❌ Error connecting to Sheet. Make sure you have created the 'Senders' tab.", reply_markup=get_keyboard())
             return
-        mk  = InlineKeyboardMarkup()
-        msg = "📋 *Senders:*\n\n"
-        if not senders:
-            msg += "_None yet._\n"
+
+        markup = InlineKeyboardMarkup()
+        msg_text = "📋 *Your Senders:*\n\n"
+        if not senders: 
+            msg_text += "No senders added yet.\n"
         else:
             for i, s in enumerate(senders):
-                msg += f"{i+1}. `{s.get('email')}` — {s.get('sent',0)}/{s.get('limit',0)}\n"
-                mk.add(InlineKeyboardButton(f"🗑️ {s.get('email')}", callback_data=f"del_{s.get('email')}"))
-        mk.add(InlineKeyboardButton("➕ Add Sender",   callback_data="add_new_sender"))
-        mk.add(InlineKeyboardButton("🔙 Back",         callback_data="back_to_main"))
-        bot.reply_to(message, msg, parse_mode="Markdown", reply_markup=mk)
+                msg_text += f"{i+1}. {s['email']} (Sent: {s['sent']}/{s['limit']})\n"
+                markup.add(InlineKeyboardButton(f"🗑️ Delete {s['email']}", callback_data=f"del_{s['email']}"))
+            
+        markup.add(InlineKeyboardButton("➕ Add New Sender", callback_data="add_new_sender"))
+        markup.add(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")) 
+        
+        bot.reply_to(message, msg_text, parse_mode="Markdown", reply_markup=markup)
 
     elif text == "🚀 Start Automation":
         if state["status"] in ["IDLE", "SCHEDULED"]:
             state["status"] = "RUNNING"
-            bot.reply_to(message, "🚀 *Starting...*", parse_mode="Markdown", reply_markup=get_keyboard())
-            threading.Thread(target=start_engine, daemon=True).start()
-
+            bot.reply_to(message, "🚀 Starting Automation...", reply_markup=get_keyboard())
+            start_engine()
+            
     elif text == "🛑 Stop Automation":
         if state["status"] == "RUNNING":
             state["status"] = "PAUSED"
-            bot.reply_to(message, "🛑 *Paused.*\nProgress saved — Resume anytime.", parse_mode="Markdown", reply_markup=get_keyboard())
-
+            bot.reply_to(message, "🛑 Automation Paused.", reply_markup=get_keyboard())
+            
     elif text == "▶️ Resume":
         if state["status"] == "PAUSED":
             state["status"] = "RUNNING"
-            bot.reply_to(message, "▶️ *Resuming from exact position...*", parse_mode="Markdown", reply_markup=get_keyboard())
-
+            bot.reply_to(message, "▶️ Resuming...", reply_markup=get_keyboard())
+            
     elif text == "⏹️ Permanent Stop":
-        state["status"]            = "IDLE"
-        state["keywords"]          = []
-        state["current_kw_index"]  = 0
-        state["current_app_queue"] = []
-        state["current_app_index"] = 0
-        state["total_leads"]       = 0
-        state["scraped_apps"]      = set()
-        bot.reply_to(message, "⏹️ *Fully reset.*", parse_mode="Markdown", reply_markup=get_keyboard())
-
+        state["status"] = "IDLE"
+        state["keywords"] = [] 
+        bot.reply_to(message, "⏹️ Automation Reset.", reply_markup=get_keyboard())
+        
     elif text == "📅 Schedule Automation":
-        if state["status"] == "IDLE":
-            state["status"] = "WAITING_TIME"
-            bot.reply_to(message, "⏰ Send time (e.g. *02:30 PM* or *14:30*)", parse_mode="Markdown", reply_markup=get_back_keyboard())
-
+        state["status"] = "WAITING_TIME"
+        bot.reply_to(message, "⏰ Send time (e.g., 02:30 PM).", reply_markup=get_back_keyboard())
+        
     elif text == "❌ Cancel Schedule":
-        state["status"]         = "IDLE"
+        state["status"] = "IDLE"
         state["scheduled_time"] = None
-        bot.reply_to(message, "❌ Cancelled.", reply_markup=get_keyboard())
-
+        bot.reply_to(message, "❌ Schedule Cancelled.", reply_markup=get_keyboard())
+        
     elif text == "🧪 Spam Test":
         if state["status"] == "IDLE":
             state["status"] = "WAITING_TEST_EMAIL"
-            bot.reply_to(message, "📧 Send test email address.", reply_markup=get_back_keyboard())
+            bot.reply_to(message, "📧 Send the email address to receive the test.", reply_markup=get_back_keyboard())
+            
+    elif state["status"] == "WAITING_TEST_EMAIL":
+        if "@" in text:
+            state["status"] = "IDLE"
+            threading.Thread(target=run_spam_test, args=(text,)).start()
+        else:
+            bot.reply_to(message, "❌ Invalid email.", reply_markup=get_back_keyboard())
 
-
-# ─────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    print("🚀 Bot starting...")
-    threading.Thread(target=run_web,       daemon=True).start()
-    threading.Thread(target=run_scheduler, daemon=True).start()
+    threading.Thread(target=run_web).start()
+    threading.Thread(target=run_scheduler).start()
     while True:
         try:
-            print("🤖 Polling...")
-            bot.polling(none_stop=True, interval=0, timeout=30)
+            print("🤖 Bot connecting to Telegram...")
+            bot.polling(none_stop=True)
         except Exception as e:
-            print(f"Poll error: {e}")
             time.sleep(5)
