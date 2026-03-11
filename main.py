@@ -15,7 +15,7 @@ def run_web():
 # --- CONFIG ---
 SHEET_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzI5eCCU_Gci6M0jFr5I_Ph48CqUvvP4_nkpngWtjFafVSr_i75yqKX37ZMG4qwG0_V/exec"
 EMAIL_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwrwh2vi677K1KyI6XkDObTCflb2yqtJp93kIWYxOj3uoUUt0PsskH5fSkgGTq1-jHW9A/exec"
-BOT_TOKEN = "8742208395:AAHx834VKnPo2zV8j2uozOMxDr4LSVsGLPA"
+BOT_TOKEN = "8709829378:AAEJJQ8jm_oTyAcGenBrIfLi4KYHRVcSJbo"
 GROQ_API_KEY = "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"
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -249,3 +249,4 @@ if __name__ == "__main__":
     threading.Thread(target=run_scheduler).start()
     print("🤖 Bot running...")
     bot.polling(none_stop=True)
+
