@@ -67,7 +67,7 @@ def parse_time(time_str):
         try: return datetime.strptime(time_str, "%H:%M").strftime("%H:%M")
         except: return None
 
-# --- AI EMAIL GENERATOR (DYNAMIC SENDER) ---
+# --- AI EMAIL GENERATOR ---
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt, sender_email):
     if not dev_name or len(dev_name) > 20: dev_name = "Developer"
     contact_html = contact_info.replace('\n', '<br>')
@@ -103,7 +103,7 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
     except:
         return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
 
-# --- CORE ENGINE (SENDER ROTATION) ---
+# --- CORE ENGINE ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
     global state
     gov_keywords = ['gov', 'government', 'ministry', 'department', 'state', 'council', 'national', 'authority']
@@ -133,7 +133,6 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 while state["status"] == "PAUSED": time.sleep(1)
                 if state["status"] == "IDLE" or state["total_leads"] >= 200: break
                 
-                # --- SENDER ROTATION CHECK ---
                 senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
                 available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
                 
@@ -279,6 +278,13 @@ def send_welcome(message):
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
     global state
+    
+    # INLINE BACK BUTTON LOGIC
+    if call.data == "back_to_main":
+        state["status"] = "IDLE"
+        bot.send_message(call.message.chat.id, "🔙 Returned to Main Menu.", reply_markup=get_keyboard())
+        return
+
     if call.data == "add_new_sender":
         script_code = """function doPost(e) {
   var data = JSON.parse(e.postData.contents);
@@ -348,18 +354,24 @@ def handle_messages(message):
             bot.reply_to(message, "❌ Please send a valid number.", reply_markup=get_back_keyboard())
 
     elif text == "📧 Manage Senders":
-        senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
+        try:
+            senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
+        except:
+            bot.reply_to(message, "❌ Error connecting to Sheet. Make sure you have created the 'Senders' tab.", reply_markup=get_keyboard())
+            return
+
         markup = InlineKeyboardMarkup()
         msg_text = "📋 *Your Senders:*\n\n"
-        if not senders: msg_text += "No senders added yet.\n"
-        
-        for i, s in enumerate(senders):
-            msg_text += f"{i+1}. {s['email']} (Sent: {s['sent']}/{s['limit']})\n"
-            markup.add(InlineKeyboardButton(f"🗑️ Delete {s['email']}", callback_data=f"del_{s['email']}"))
+        if not senders: 
+            msg_text += "No senders added yet.\n"
+        else:
+            for i, s in enumerate(senders):
+                msg_text += f"{i+1}. {s['email']} (Sent: {s['sent']}/{s['limit']})\n"
+                markup.add(InlineKeyboardButton(f"🗑️ Delete {s['email']}", callback_data=f"del_{s['email']}"))
             
         markup.add(InlineKeyboardButton("➕ Add New Sender", callback_data="add_new_sender"))
+        markup.add(InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")) # Inline Back Button
         
-        # EKHANE FIX KORA HOISE: reply_markup=markup deya hoise
         bot.reply_to(message, msg_text, parse_mode="Markdown", reply_markup=markup)
 
     elif text == "🚀 Start Automation":
@@ -397,14 +409,12 @@ def handle_messages(message):
             state["status"] = "WAITING_TEST_EMAIL"
             bot.reply_to(message, "📧 Send the email address to receive the test.", reply_markup=get_back_keyboard())
             
-    else:
-        parsed_time = parse_time(text)
-        if parsed_time:
-            state["status"] = "SCHEDULED"
-            state["scheduled_time"] = parsed_time
-            bot.reply_to(message, f"✅ Scheduled successfully! It will run everyday at {text} (Bangladesh Time).", reply_markup=get_keyboard())
-        elif state["status"] not in ["RUNNING", "PAUSED", "WAITING_TEST_EMAIL"]:
-            bot.reply_to(message, "❌ Invalid command. Please use the keyboard buttons.")
+    elif state["status"] == "WAITING_TEST_EMAIL":
+        if "@" in text:
+            state["status"] = "IDLE"
+            threading.Thread(target=run_spam_test, args=(text,)).start()
+        else:
+            bot.reply_to(message, "❌ Invalid email.", reply_markup=get_back_keyboard())
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
