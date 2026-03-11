@@ -15,8 +15,7 @@ def run_web():
     web_app.run(host="0.0.0.0", port=port)
 
 # --- CONFIG ---
-# Apnar deya notun URL ekhane set kora hoise
-SHEET_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbw0M3rpnMP9UOCWBFWLyMUYBhyCiGK5E-fmGPclS_rTeXOll5eGcO7pO3SvLqRjKUoD/exec"
+SHEET_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzI5eCCU_Gci6M0jFr5I_Ph48CqUvvP4_nkpngWtjFafVSr_i75yqKX37ZMG4qwG0_V/exec"
 BOT_TOKEN = "8709829378:AAEJJQ8jm_oTyAcGenBrIfLi4KYHRVcSJbo"
 GROQ_API_KEY = "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"
 
@@ -68,7 +67,7 @@ def parse_time(time_str):
         try: return datetime.strptime(time_str, "%H:%M").strftime("%H:%M")
         except: return None
 
-# --- AI EMAIL GENERATOR ---
+# --- AI EMAIL GENERATOR (DYNAMIC SENDER) ---
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt, sender_email):
     if not dev_name or len(dev_name) > 20: dev_name = "Developer"
     contact_html = contact_info.replace('\n', '<br>')
@@ -104,7 +103,7 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
     except:
         return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
 
-# --- CORE ENGINE ---
+# --- CORE ENGINE (SENDER ROTATION) ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
     global state
     gov_keywords = ['gov', 'government', 'ministry', 'department', 'state', 'council', 'national', 'authority']
@@ -134,6 +133,7 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 while state["status"] == "PAUSED": time.sleep(1)
                 if state["status"] == "IDLE" or state["total_leads"] >= 200: break
                 
+                # --- SENDER ROTATION CHECK ---
                 senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
                 available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
                 
@@ -225,21 +225,15 @@ def start_engine():
         state["status"] = "IDLE"
         bot.send_message(state["chat_id"], f"❌ System Error: {e}", reply_markup=get_keyboard())
 
-# --- SPAM TEST ENGINE (FAST & THREADED) ---
 def run_spam_test(test_email):
+    bot.send_message(state["chat_id"], "🔄 Fetching data for Spam Test...")
     try:
-        # 1. Check Senders
-        senders_req = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"})
-        senders = senders_req.json()
-        
+        senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
         if not senders:
-            bot.send_message(state["chat_id"], "❌ No senders added! Please go to 'Manage Senders' and add a sender first.", reply_markup=get_keyboard())
+            bot.send_message(state["chat_id"], "❌ No senders added! Please add a sender first.", reply_markup=get_keyboard())
             return
-            
         sender = senders[0] 
-        bot.send_message(state["chat_id"], f"✅ Using sender: {sender['email']}. Fetching data...")
         
-        # 2. Fetch Settings & Lead
         res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
         lead_res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_one_lead"}).json()
         
@@ -250,36 +244,15 @@ def run_spam_test(test_email):
             app_name, dev_name, rating, installs = "Demo Finance App", "Demo Studio", 4.8, 50000
             description = "A revolutionary app designed to make daily transactions easier."
             
-        bot.send_message(state["chat_id"], "✍️ Generating AI Email...")
         subject, body = generate_email_content(app_name, dev_name, rating, installs, description, res['contact_info'], res['email_prompt'], sender['email'])
-        
-        bot.send_message(state["chat_id"], "🚀 Sending email...")
         mail_res = requests.post(sender['url'], json={"action": "send_email", "to": test_email, "subject": subject, "body": body})
         
         if mail_res.text == "Success":
             bot.send_message(state["chat_id"], f"✅ Spam Test Email sent to: {test_email}\n*(Sent via: {sender['email']})*", parse_mode="Markdown", reply_markup=get_keyboard())
         else:
-            bot.send_message(state["chat_id"], f"❌ Failed to send: {mail_res.text}", reply_markup=get_keyboard())
-            
+            bot.send_message(state["chat_id"], f"❌ Failed: {mail_res.text}", reply_markup=get_keyboard())
     except Exception as e:
-        bot.send_message(state["chat_id"], f"❌ Error during Spam Test: {e}\nMake sure your Sheet URL is correct and Senders are added.", reply_markup=get_keyboard())
-
-# --- MANAGE SENDERS ENGINE (FAST & THREADED) ---
-def fetch_and_show_senders(chat_id):
-    try:
-        senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
-        markup = InlineKeyboardMarkup()
-        msg_text = "📋 *Your Senders:*\n\n"
-        if not senders: msg_text += "No senders added yet.\n"
-        
-        for i, s in enumerate(senders):
-            msg_text += f"{i+1}. {s['email']} (Sent: {s['sent']}/{s['limit']})\n"
-            markup.add(InlineKeyboardButton(f"🗑️ Delete {s['email']}", callback_data=f"del_{s['email']}"))
-            
-        markup.add(InlineKeyboardButton("➕ Add New Sender", callback_data="add_new_sender"))
-        bot.send_message(chat_id, msg_text, parse_mode="Markdown", reply_markup=markup)
-    except Exception as e:
-        bot.send_message(chat_id, f"❌ Error fetching senders: {e}")
+        bot.send_message(state["chat_id"], f"❌ Error: {e}", reply_markup=get_keyboard())
 
 # --- SCHEDULER THREAD ---
 def run_scheduler():
@@ -339,6 +312,7 @@ def handle_messages(message):
     text = message.text
     state["chat_id"] = message.chat.id
 
+    # --- GLOBAL BACK BUTTON ---
     if text == "🔙 Back to Main Menu":
         state["status"] = "IDLE"
         state["temp_sender_url"] = None
@@ -364,19 +338,29 @@ def handle_messages(message):
             
     elif state["status"] == "WAITING_SENDER_LIMIT":
         if text.isdigit():
-            bot.reply_to(message, "🔄 Saving sender to database, please wait...")
             requests.post(SHEET_WEB_APP_URL, json={
                 "action": "add_sender", "email": state["temp_sender_email"], 
                 "url": state["temp_sender_url"], "limit": int(text)
             })
-            bot.send_message(message.chat.id, f"🎉 Sender {state['temp_sender_email']} added successfully with limit {text}!", reply_markup=get_keyboard())
+            bot.reply_to(message, f"🎉 Sender {state['temp_sender_email']} added successfully with limit {text}!", reply_markup=get_keyboard())
             state["status"] = "IDLE"
         else:
             bot.reply_to(message, "❌ Please send a valid number.", reply_markup=get_back_keyboard())
 
     elif text == "📧 Manage Senders":
-        bot.reply_to(message, "🔄 Fetching senders list, please wait...", reply_markup=get_back_keyboard())
-        threading.Thread(target=fetch_and_show_senders, args=(message.chat.id,)).start()
+        senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
+        markup = InlineKeyboardMarkup()
+        msg_text = "📋 *Your Senders:*\n\n"
+        if not senders: msg_text += "No senders added yet.\n"
+        
+        for i, s in enumerate(senders):
+            msg_text += f"{i+1}. {s['email']} (Sent: {s['sent']}/{s['limit']})\n"
+            markup.add(InlineKeyboardButton(f"🗑️ Delete {s['email']}", callback_data=f"del_{s['email']}"))
+            
+        markup.add(InlineKeyboardButton("➕ Add New Sender", callback_data="add_new_sender"))
+        
+        # EKHANE FIX KORA HOISE: reply_markup=markup deya hoise
+        bot.reply_to(message, msg_text, parse_mode="Markdown", reply_markup=markup)
 
     elif text == "🚀 Start Automation":
         if state["status"] in ["IDLE", "SCHEDULED"]:
@@ -413,21 +397,13 @@ def handle_messages(message):
             state["status"] = "WAITING_TEST_EMAIL"
             bot.reply_to(message, "📧 Send the email address to receive the test.", reply_markup=get_back_keyboard())
             
-    elif state["status"] == "WAITING_TEST_EMAIL":
-        if "@" in text:
-            state["status"] = "IDLE"
-            bot.reply_to(message, "🔄 Starting Spam Test, please wait...", reply_markup=get_keyboard())
-            threading.Thread(target=run_spam_test, args=(text,)).start()
-        else:
-            bot.reply_to(message, "❌ Invalid email.", reply_markup=get_back_keyboard())
-            
     else:
         parsed_time = parse_time(text)
         if parsed_time:
             state["status"] = "SCHEDULED"
             state["scheduled_time"] = parsed_time
             bot.reply_to(message, f"✅ Scheduled successfully! It will run everyday at {text} (Bangladesh Time).", reply_markup=get_keyboard())
-        elif state["status"] not in ["RUNNING", "PAUSED", "WAITING_TEST_EMAIL", "WAITING_SENDER_URL", "WAITING_SENDER_EMAIL", "WAITING_SENDER_LIMIT"]:
+        elif state["status"] not in ["RUNNING", "PAUSED", "WAITING_TEST_EMAIL"]:
             bot.reply_to(message, "❌ Invalid command. Please use the keyboard buttons.")
 
 # --- MAIN EXECUTION ---
