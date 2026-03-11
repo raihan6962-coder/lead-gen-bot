@@ -116,11 +116,9 @@ def safe_int_conversion(value, default=0):
     if isinstance(value, (int, float)):
         return int(value)
     try:
-        # Remove commas and any non-numeric characters except decimal point
         cleaned = str(value).replace(',', '').strip()
         if cleaned == '' or cleaned.lower() == 'none' or cleaned.lower() == 'null':
             return default
-        # Extract first number found in string
         numbers = re.findall(r'\d+', cleaned)
         if numbers:
             return int(numbers[0])
@@ -138,7 +136,6 @@ def safe_float_conversion(value, default=0.0):
         cleaned = str(value).replace(',', '').strip()
         if cleaned == '' or cleaned.lower() == 'none' or cleaned.lower() == 'null':
             return default
-        # Extract first number found in string (including decimals)
         numbers = re.findall(r'\d+\.?\d*', cleaned)
         if numbers:
             return float(numbers[0])
@@ -146,7 +143,7 @@ def safe_float_conversion(value, default=0.0):
     except:
         return default
 
-# --- CORE ENGINE (FULLY FIXED) ---
+# --- CORE ENGINE (DETAILED FILTERING DEBUG) ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
     global state
     gov_keywords = ['gov', 'government', 'ministry', 'department', 'state', 'council', 'national', 'authority']
@@ -182,10 +179,20 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
 
             bot.send_message(state["chat_id"], f"📊 Found {len(unique_results)} unique apps. Filtering now...")
 
-            leads_in_this_kw = 0
-            for r in unique_results:
+            # Counters for filtering steps
+            total_apps = len(unique_results)
+            apps_with_email = 0
+            apps_not_government = 0
+            apps_passed_rating_installs = 0
+            leads_found = 0
+
+            for idx, r in enumerate(unique_results):
                 while state["status"] == "PAUSED": time.sleep(1)
                 if state["status"] == "IDLE" or state["total_leads"] >= 200: break
+
+                # Optional: send progress every 10 apps
+                if (idx+1) % 10 == 0:
+                    bot.send_message(state["chat_id"], f"⏳ Progress: {idx+1}/{total_apps} apps processed...")
 
                 # Check sender availability
                 try:
@@ -200,7 +207,8 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     continue
 
                 app_id = r['appId']
-                if app_id in state["scraped_apps"]: continue
+                if app_id in state["scraped_apps"]: 
+                    continue
                 state["scraped_apps"].add(app_id)
 
                 try:
@@ -208,29 +216,40 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 except:
                     continue
 
-                # --- EMAIL CHECK ---
+                # --- FILTER 1: EMAIL CHECK ---
                 email = str(d.get('developerEmail', '')).strip().lower()
                 if not email or email == 'none' or email == 'null':
-                    continue
-                if email in state["existing_emails"]:
-                    continue
+                    continue  # no email, skip
+                apps_with_email += 1
 
-                # --- GOVERNMENT FILTER ---
+                if email in state["existing_emails"]:
+                    continue  # already sent
+
+                # --- FILTER 2: GOVERNMENT FILTER ---
                 dev_name = str(d.get('developer', '')).lower()
                 gov_pattern = r'\b(?:' + '|'.join(gov_keywords) + r')\b'
                 if re.search(gov_pattern, dev_name):
                     continue
+                apps_not_government += 1
 
-                # --- SAFE RATING & INSTALLS CONVERSION (COMPLETELY FIXED) ---
+                # --- FILTER 3: RATING & INSTALLS ---
                 rating = safe_float_conversion(d.get('score', 0))
                 installs = safe_int_conversion(d.get('minInstalls', 0))
 
-                # Apply filters
-                if rating <= max_rating and installs <= max_installs:
+                # Relaxed conditions
+                installs_limit_passed = (max_installs == 0) or (installs <= max_installs)
+                rating_limit_passed = (max_rating == 0) or (rating <= max_rating)
+                if rating == 0 and max_rating > 0:
+                    rating_limit_passed = True  # allow apps with no rating
+
+                if installs_limit_passed and rating_limit_passed:
+                    apps_passed_rating_installs += 1
+
+                    # --- LEAD PROCESSING ---
                     bot.send_message(state["chat_id"], f"✨ Lead Found: *{d['title']}*\nGenerating Email...", parse_mode="Markdown")
 
                     subject, body = generate_email_content(
-                        d['title'], d['developer'], rating, installs,
+                        d['title'], d.get('developer', 'Developer'), rating, installs,
                         d.get('description', ''), contact_info, email_prompt,
                         current_sender['email']
                     )
@@ -238,9 +257,9 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     # Save to sheet
                     try:
                         requests.post(SHEET_WEB_APP_URL, json={
-                            "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
+                            "action": "save_lead", "app_name": d['title'], "dev_name": d.get('developer', ''),
                             "email": email, "subject": subject, "body": body, "installs": installs,
-                            "rating": rating, "link": d['url'], "category": d.get('genre', ''),
+                            "rating": rating, "link": d.get('url', ''), "category": d.get('genre', ''),
                             "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
                         })
                         state["existing_emails"].add(email)
@@ -249,11 +268,11 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
 
                     # Send email
                     try:
-                        mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body})
+                        mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body}, timeout=30)
                         if mail_res.text == "Success":
                             requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
                             state["total_leads"] += 1
-                            leads_in_this_kw += 1
+                            leads_found += 1
                             bot.send_message(
                                 state["chat_id"],
                                 f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*",
@@ -268,10 +287,14 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     except:
                         continue
 
-            if leads_in_this_kw == 0:
-                bot.send_message(state["chat_id"], f"⚠️ No leads found for '{kw}'. Try adjusting filters.")
-            else:
-                bot.send_message(state["chat_id"], f"✅ Found {leads_in_this_kw} leads for '{kw}'.")
+            # Send summary for this keyword
+            summary = f"📊 *Keyword Summary: {kw}*\n"
+            summary += f"• Total apps found: {total_apps}\n"
+            summary += f"• Apps with email: {apps_with_email}\n"
+            summary += f"• Non-government: {apps_not_government}\n"
+            summary += f"• Passed rating/installs: {apps_passed_rating_installs}\n"
+            summary += f"• Leads sent: {leads_found}\n"
+            bot.send_message(state["chat_id"], summary, parse_mode="Markdown")
 
         except Exception as e:
             print(f"Error in engine_thread: {e}")
