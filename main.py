@@ -1,5 +1,6 @@
-import requests, telebot, time, random, os, threading, schedule, re
+import requests, telebot, time, random, os, threading, re
 from datetime import datetime
+import pytz
 from flask import Flask
 from groq import Groq
 from google_play_scraper import search, app
@@ -24,7 +25,7 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 # --- STATE MANAGEMENT ---
 state = {
-    "status": "IDLE", 
+    "status": "IDLE", # IDLE, RUNNING, PAUSED, SCHEDULED
     "keywords": [],
     "current_kw_index": 0,
     "total_leads": 0,
@@ -42,39 +43,41 @@ def get_keyboard():
         markup.add(KeyboardButton("🛑 Stop Automation"))
     elif state["status"] == "PAUSED":
         markup.add(KeyboardButton("▶️ Resume"), KeyboardButton("⏹️ Permanent Stop"))
-    elif state["status"] == "WAITING_TIME":
+    elif state["status"] == "SCHEDULED":
         markup.add(KeyboardButton("❌ Cancel Schedule"))
-    return markup
-
-def get_schedule_options():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(KeyboardButton("✅ Everyday at this time"), KeyboardButton("❌ Cancel Schedule"))
     return markup
 
 # --- TIME PARSER (AM/PM Support) ---
 def parse_time(time_str):
     time_str = time_str.strip().upper()
     try:
-        # Try AM/PM format (e.g., "02:30 PM" or "2:30 PM")
         t = datetime.strptime(time_str, "%I:%M %p")
         return t.strftime("%H:%M")
     except ValueError:
         try:
-            # Try 24-hour format (e.g., "14:30")
             t = datetime.strptime(time_str, "%H:%M")
             return t.strftime("%H:%M")
         except ValueError:
             return None
 
-# --- AI EMAIL GENERATOR ---
+# --- AI EMAIL GENERATOR (HTML FIXED) ---
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt):
     if not dev_name or len(dev_name) > 20: dev_name = "Developer"
+    
+    # Format contact info for HTML
+    contact_html = contact_info.replace('\n', '<br>')
+    
     prompt = f"""
     {email_prompt}
     
     App Details: App Name: {app_name}, Developer: {dev_name}, Rating: {rating}, Installs: {installs}
     
-    Format EXACTLY like this (Use HTML tags like <br> for line breaks):
+    RULES:
+    1. Output ONLY valid HTML for the body. Use <br> for newlines.
+    2. DO NOT use markdown like **bold**. Use <b>bold</b> if needed.
+    3. Include this signature at the end: <br><br>{contact_html}
+    
+    Format EXACTLY like this:
     SUBJECT: [Subject Line]
     BODY: [HTML Email Body]
     """
@@ -84,11 +87,16 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
         subject = content.split("SUBJECT:")[1].split("BODY:")[0].strip()
         body = content.split("BODY:")[1].strip()
         
-        unsubscribe_html = f"<br><br><hr><div style='text-align: center;'><a href='mailto:your-email@gmail.com?subject=Unsubscribe' style='color: #888; font-size: 12px; text-decoration: none;'>Unsubscribe from future emails</a></div>"
+        # Clean up any accidental markdown
+        body = body.replace('**', '<b>').replace('*', '')
+        if '<br>' not in body: body = body.replace('\n', '<br>')
+        
+        # Add Centered Unsubscribe Button
+        unsubscribe_html = f"<br><br><hr style='border: 0; border-top: 1px solid #eee;'><div style='text-align: center; padding-top: 10px;'><a href='mailto:unsubscribe@yourdomain.com?subject=Unsubscribe me' style='color: #999; font-size: 12px; text-decoration: underline; font-family: Arial, sans-serif;'>Unsubscribe from future emails</a></div>"
         body += unsubscribe_html
         return subject, body
     except:
-        return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_info}"
+        return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
 
 # --- CORE ENGINE ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
@@ -101,18 +109,29 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
         if state["total_leads"] >= 200: break
         
         kw = state["keywords"][state["current_kw_index"]]
-        bot.send_message(state["chat_id"], f"🔍 Searching Keyword: *{kw}*", parse_mode="Markdown")
+        bot.send_message(state["chat_id"], f"🔍 Deep Searching Keyword: *{kw}*", parse_mode="Markdown")
         
         try:
-            # Max 200 apps per keyword
-            results = search(kw, lang='en', country='us', n_hits=200) 
+            # 1. Keyword Expansion (To get 100-200+ apps)
+            raw_results = search(kw, lang='en', country='us', n_hits=150)
+            if len(raw_results) < 100:
+                raw_results += search(kw + " app", lang='en', country='us', n_hits=100)
+                raw_results += search(kw + " free", lang='en', country='us', n_hits=100)
+            
+            # Remove duplicates from expanded search
+            results = []
+            seen = set()
+            for r in raw_results:
+                if r['appId'] not in seen:
+                    seen.add(r['appId'])
+                    results.append(r)
             
             if not results:
                 bot.send_message(state["chat_id"], f"⚠️ No apps found for '{kw}'. Moving to next...")
                 state["current_kw_index"] += 1
                 continue
                 
-            bot.send_message(state["chat_id"], f"📊 Found {len(results)} apps for '{kw}'. Filtering now...")
+            bot.send_message(state["chat_id"], f"📊 Found {len(results)} unique apps for '{kw}'. Filtering now...")
             leads_in_this_kw = 0
             
             for r in results:
@@ -186,11 +205,10 @@ def start_engine():
                 messages=[{"role": "user", "content": f"{res['keyword_prompt']} Niche: {res['niche']}. Give me 200 unique broad keywords separated by commas."}],
                 model="llama-3.1-8b-instant",
             )
-            # Clean keywords (Remove numbers/bullets)
             raw_kws = chat.choices[0].message.content.split(',')
             cleaned_kws = []
             for k in raw_kws:
-                k = re.sub(r'^\d+[\.\)]?\s*', '', k).strip() # Removes "1.", "2)", etc.
+                k = re.sub(r'^\d+[\.\)]?\s*', '', k).strip() 
                 if len(k) > 3: cleaned_kws.append(k)
                 
             state["keywords"] = cleaned_kws
@@ -204,18 +222,19 @@ def start_engine():
         state["status"] = "IDLE"
         bot.send_message(state["chat_id"], f"❌ System Error: {e}", reply_markup=get_keyboard())
 
-# --- SCHEDULER THREAD ---
+# --- SCHEDULER THREAD (Bangladesh Time) ---
 def run_scheduler():
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
-
-def scheduled_job():
     global state
-    if state["status"] == "IDLE":
-        state["status"] = "RUNNING"
-        bot.send_message(state["chat_id"], "⏰ Scheduled Automation Started!", reply_markup=get_keyboard())
-        start_engine()
+    tz = pytz.timezone('Asia/Dhaka') # Set to Bangladesh Time
+    while True:
+        if state["status"] == "SCHEDULED" and state["scheduled_time"]:
+            now = datetime.now(tz).strftime("%H:%M")
+            if now == state["scheduled_time"]:
+                state["status"] = "RUNNING"
+                bot.send_message(state["chat_id"], "⏰ Scheduled Time Reached! Starting Automation...", reply_markup=get_keyboard())
+                start_engine()
+                time.sleep(60) # Prevent double trigger in the same minute
+        time.sleep(10)
 
 # --- BOT COMMANDS ---
 @bot.message_handler(commands=['start'])
@@ -231,7 +250,7 @@ def handle_messages(message):
     state["chat_id"] = message.chat.id
 
     if text == "🚀 Start Automation":
-        if state["status"] == "IDLE":
+        if state["status"] in ["IDLE", "SCHEDULED"]:
             state["status"] = "RUNNING"
             bot.reply_to(message, "🚀 Starting Automation...", reply_markup=get_keyboard())
             start_engine()
@@ -252,26 +271,22 @@ def handle_messages(message):
         bot.reply_to(message, "⏹️ Automation Permanently Stopped and Reset.", reply_markup=get_keyboard())
         
     elif text == "📅 Schedule Automation":
-        state["status"] = "WAITING_TIME"
-        bot.reply_to(message, "⏰ Please send the time. You can use AM/PM (e.g., 02:30 PM) or 24-hour format (e.g., 14:30).", reply_markup=get_keyboard())
+        bot.reply_to(message, "⏰ Please send the time. You can use AM/PM (e.g., 02:30 PM) or 24-hour format (e.g., 14:30).")
         
     elif text == "❌ Cancel Schedule":
         state["status"] = "IDLE"
-        schedule.clear()
+        state["scheduled_time"] = None
         bot.reply_to(message, "❌ Schedule Cancelled.", reply_markup=get_keyboard())
         
-    elif text == "✅ Everyday at this time":
-        bot.reply_to(message, f"✅ Scheduled successfully! It will run everyday at {state['scheduled_time']}.", reply_markup=get_keyboard())
-        
-    elif state["status"] == "WAITING_TIME":
+    else:
+        # Check if user sent a time for scheduling
         parsed_time = parse_time(text)
         if parsed_time:
-            schedule.every().day.at(parsed_time).do(scheduled_job)
-            state["status"] = "IDLE"
-            state["scheduled_time"] = text
-            bot.reply_to(message, f"Time set to {text} (Server Time). Choose frequency:", reply_markup=get_schedule_options())
-        else:
-            bot.reply_to(message, "❌ Invalid time format. Please use '02:30 PM' or '14:30'.")
+            state["status"] = "SCHEDULED"
+            state["scheduled_time"] = parsed_time
+            bot.reply_to(message, f"✅ Scheduled successfully! It will run everyday at {text} (Bangladesh Time).", reply_markup=get_keyboard())
+        elif state["status"] not in ["RUNNING", "PAUSED"]:
+            bot.reply_to(message, "❌ Invalid command or time format. Please use '02:30 PM' or '14:30'.")
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
