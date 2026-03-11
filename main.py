@@ -19,6 +19,9 @@ SHEET_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzI5eCCU_Gci6M0jFr5
 BOT_TOKEN = "8709829378:AAEJJQ8jm_oTyAcGenBrIfLi4KYHRVcSJbo"
 GROQ_API_KEY = "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"
 
+# Ekhane apnar email ta din (Unsubscribe link e eita use hobe)
+SENDER_EMAIL = "aburaihan6963@gmail.com" 
+
 bot = telebot.TeleBot(BOT_TOKEN)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -124,15 +127,31 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
         bot.send_message(state["chat_id"], f"🔍 Searching Keyword: *{kw}*", parse_mode="Markdown")
         
         try:
-            # Working code er moto simple search
-            results = search(kw, lang='en', country='us', n_hits=150)
+            # 1. SMART SENDER FETCHING (Loop er baire, jate sheet hang na hoy)
+            senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
+            available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
             
-            if not results:
-                bot.send_message(state["chat_id"], f"⚠️ No apps found for '{kw}'. Moving to next...")
-                state["current_kw_index"] += 1
+            if not available_senders:
+                bot.send_message(state["chat_id"], "⚠️ All senders have reached their daily limit! Pausing automation.")
+                state["status"] = "PAUSED"
                 continue
                 
+            current_sender = available_senders[0]
+
+            # 2. AGGRESSIVE SEARCH
+            raw_results = search(kw, lang='en', country='us', n_hits=150)
+            if len(raw_results) < 50:
+                raw_results += search(kw + " app", lang='en', country='us', n_hits=100)
+            
+            results = []
+            seen = set()
+            for r in raw_results:
+                if r['appId'] not in seen:
+                    seen.add(r['appId'])
+                    results.append(r)
+            
             leads_in_this_kw = 0
+            bot.send_message(state["chat_id"], f"📊 Found {len(results)} unique apps. Filtering now...")
             
             for r in results:
                 while state["status"] == "PAUSED": time.sleep(1)
@@ -142,10 +161,16 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 if app_id in state["scraped_apps"]: continue
                 state["scraped_apps"].add(app_id)
                 
-                try: d = app(app_id)
-                except: continue
+                # ANTI-BAN DELAY (Google jate block na kore)
+                time.sleep(0.3)
                 
-                # Safe Parsing
+                try: 
+                    d = app(app_id)
+                except Exception as e: 
+                    print(f"Failed to fetch {app_id}: {e}")
+                    continue
+                
+                # SAFE PARSING
                 raw_score = d.get('score')
                 rating = float(raw_score) if raw_score is not None else 0.0
                 
@@ -154,33 +179,23 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 
                 email = str(d.get('developerEmail', '')).strip().lower()
                 
-                # 1. Fast Filter: Email na thakle ba duplicate hole skip
-                if not email or email == 'none' or email in state["existing_emails"]: continue
+                # FAST FILTER
+                if not email or email == 'none': 
+                    continue
+                if email in state["existing_emails"]: 
+                    continue
                 
                 dev_name = str(d.get('developer', '')).lower()
-                if any(g in dev_name for g in gov_keywords): continue 
+                if any(g in dev_name for g in gov_keywords): 
+                    continue 
                 
-                # 2. Main Filter: Rating & Installs
+                # STRICT RATING & INSTALL FILTER
                 if rating <= max_rating and installs <= max_installs:
-                    
-                    # 3. SENDER CHECK (Eita ekhon filter pass korar por hobe, jate bot fast thake)
-                    try:
-                        senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
-                        available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
-                    except:
-                        continue
-                    
-                    if not available_senders:
-                        bot.send_message(state["chat_id"], "⚠️ All senders have reached their daily limit! Pausing automation.")
-                        state["status"] = "PAUSED"
-                        break
-                    
-                    current_sender = available_senders[0] 
-                    
                     bot.send_message(state["chat_id"], f"✨ Lead Found: *{d['title']}*\n(Rating: {rating}, Installs: {installs})\nGenerating Email...", parse_mode="Markdown")
                     
                     subject, body = generate_email_content(d['title'], d['developer'], rating, installs, d.get('description', ''), contact_info, email_prompt, current_sender['email'])
                     
+                    # Save to Sheet
                     requests.post(SHEET_WEB_APP_URL, json={
                         "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
                         "email": email, "subject": subject, "body": body, "installs": installs,
@@ -189,13 +204,22 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     })
                     state["existing_emails"].add(email)
                     
+                    # Send Email
                     mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body})
                     
                     if mail_res.text == "Success":
+                        # Update Sender Count
                         requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
+                        current_sender['sent'] = int(current_sender['sent']) + 1
+                        
                         state["total_leads"] += 1
                         leads_in_this_kw += 1
                         bot.send_message(state["chat_id"], f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*", parse_mode="Markdown")
+                        
+                        # Check if sender limit reached during loop
+                        if current_sender['sent'] >= int(current_sender['limit']):
+                            bot.send_message(state["chat_id"], f"🔄 Sender {current_sender['email']} reached limit. Switching sender...")
+                            break # Break inner loop to fetch new sender
                         
                         delay = random.randint(60, 120)
                         bot.send_message(state["chat_id"], f"⏳ Waiting {delay}s before next lead...")
@@ -205,10 +229,7 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     else:
                         bot.send_message(state["chat_id"], f"❌ Failed to send email to {email}")
             
-            if leads_in_this_kw < 3: 
-                bot.send_message(state["chat_id"], f"⚠️ Only got {leads_in_this_kw} leads from '{kw}'. Moving to next keyword...")
-            else:
-                bot.send_message(state["chat_id"], f"✅ Finished '{kw}'. Got {leads_in_this_kw} solid leads.")
+            if leads_in_this_kw < 3: bot.send_message(state["chat_id"], f"⚠️ Moving to next keyword...")
                 
         except Exception as e: 
             print(f"Error: {e}")
