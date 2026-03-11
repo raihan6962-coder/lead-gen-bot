@@ -50,6 +50,11 @@ def get_keyboard():
         markup.add(KeyboardButton("❌ Cancel Schedule"))
     return markup
 
+def get_back_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton("🔙 Back to Main Menu"))
+    return markup
+
 def get_schedule_options():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(KeyboardButton("✅ Everyday at this time"), KeyboardButton("❌ Cancel Schedule"))
@@ -62,7 +67,7 @@ def parse_time(time_str):
         try: return datetime.strptime(time_str, "%H:%M").strftime("%H:%M")
         except: return None
 
-# --- AI EMAIL GENERATOR (DYNAMIC SENDER) ---
+# --- AI EMAIL GENERATOR ---
 def generate_email_content(app_name, dev_name, rating, installs, description, contact_info, email_prompt, sender_email):
     if not dev_name or len(dev_name) > 20: dev_name = "Developer"
     contact_html = contact_info.replace('\n', '<br>')
@@ -98,7 +103,7 @@ def generate_email_content(app_name, dev_name, rating, installs, description, co
     except:
         return f"Collaboration for {app_name}", f"Hi {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
 
-# --- CORE ENGINE (SENDER ROTATION) ---
+# --- CORE ENGINE ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
     global state
     gov_keywords = ['gov', 'government', 'ministry', 'department', 'state', 'council', 'national', 'authority']
@@ -128,7 +133,6 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 while state["status"] == "PAUSED": time.sleep(1)
                 if state["status"] == "IDLE" or state["total_leads"] >= 200: break
                 
-                # --- SENDER ROTATION CHECK ---
                 senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
                 available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
                 
@@ -137,7 +141,7 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     state["status"] = "PAUSED"
                     continue
                 
-                current_sender = available_senders[0] # Pick the first available sender
+                current_sender = available_senders[0] 
                 
                 app_id = r['appId']
                 if app_id in state["scraped_apps"]: continue
@@ -168,13 +172,10 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     })
                     state["existing_emails"].add(email)
                     
-                    # Send Email using the specific sender's URL
                     mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body})
                     
                     if mail_res.text == "Success":
-                        # Increment sender count
                         requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
-                        
                         state["total_leads"] += 1
                         leads_in_this_kw += 1
                         bot.send_message(state["chat_id"], f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*", parse_mode="Markdown")
@@ -230,7 +231,7 @@ def run_spam_test(test_email):
         if not senders:
             bot.send_message(state["chat_id"], "❌ No senders added! Please add a sender first.", reply_markup=get_keyboard())
             return
-        sender = senders[0] # Use first sender for test
+        sender = senders[0] 
         
         res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
         lead_res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_one_lead"}).json()
@@ -271,6 +272,7 @@ def run_scheduler():
 def send_welcome(message):
     global state
     state["chat_id"] = message.chat.id
+    state["status"] = "IDLE"
     bot.reply_to(message, "👋 Welcome Boss! What would you like to do?", reply_markup=get_keyboard())
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -286,7 +288,7 @@ def handle_query(call):
     } catch (error) { return ContentService.createTextOutput("Error: " + error.toString()); }
   }
 }"""
-        bot.send_message(call.message.chat.id, f"📝 **Deploy this code in your new Email's Apps Script:**\n\n`{script_code}`\n\nAfter deploying, please send me the **Web App URL**.", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, f"📝 **Deploy this code in your new Email's Apps Script:**\n\n`{script_code}`\n\nAfter deploying, please send me the **Web App URL**.", parse_mode="Markdown", reply_markup=get_back_keyboard())
         state["status"] = "WAITING_SENDER_URL"
         
     elif call.data.startswith("del_"):
@@ -309,21 +311,29 @@ def handle_messages(message):
     text = message.text
     state["chat_id"] = message.chat.id
 
+    # --- GLOBAL BACK BUTTON ---
+    if text == "🔙 Back to Main Menu":
+        state["status"] = "IDLE"
+        state["temp_sender_url"] = None
+        state["temp_sender_email"] = None
+        bot.reply_to(message, "🔙 Returned to Main Menu.", reply_markup=get_keyboard())
+        return
+
     if state["status"] == "WAITING_SENDER_URL":
         if "script.google.com" in text:
             state["temp_sender_url"] = text
             state["status"] = "WAITING_SENDER_EMAIL"
-            bot.reply_to(message, "✅ URL received. Now, what is the **Email Address** for this sender?", parse_mode="Markdown")
+            bot.reply_to(message, "✅ URL received. Now, what is the **Email Address** for this sender?", parse_mode="Markdown", reply_markup=get_back_keyboard())
         else:
-            bot.reply_to(message, "❌ Invalid URL. Please send a valid Google Apps Script URL.")
+            bot.reply_to(message, "❌ Invalid URL. Please send a valid Google Apps Script URL.", reply_markup=get_back_keyboard())
             
     elif state["status"] == "WAITING_SENDER_EMAIL":
         if "@" in text:
             state["temp_sender_email"] = text
             state["status"] = "WAITING_SENDER_LIMIT"
-            bot.reply_to(message, "✅ Email received. What is the **Daily Sending Limit** for this email? (e.g., 20)", parse_mode="Markdown")
+            bot.reply_to(message, "✅ Email received. What is the **Daily Sending Limit** for this email? (e.g., 20)", parse_mode="Markdown", reply_markup=get_back_keyboard())
         else:
-            bot.reply_to(message, "❌ Invalid Email. Try again.")
+            bot.reply_to(message, "❌ Invalid Email. Try again.", reply_markup=get_back_keyboard())
             
     elif state["status"] == "WAITING_SENDER_LIMIT":
         if text.isdigit():
@@ -334,7 +344,7 @@ def handle_messages(message):
             bot.reply_to(message, f"🎉 Sender {state['temp_sender_email']} added successfully with limit {text}!", reply_markup=get_keyboard())
             state["status"] = "IDLE"
         else:
-            bot.reply_to(message, "❌ Please send a valid number.")
+            bot.reply_to(message, "❌ Please send a valid number.", reply_markup=get_back_keyboard())
 
     elif text == "📧 Manage Senders":
         senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
@@ -347,7 +357,7 @@ def handle_messages(message):
             markup.add(InlineKeyboardButton(f"🗑️ Delete {s['email']}", callback_data=f"del_{s['email']}"))
             
         markup.add(InlineKeyboardButton("➕ Add New Sender", callback_data="add_new_sender"))
-        bot.reply_to(message, msg_text, parse_mode="Markdown", reply_markup=markup)
+        bot.reply_to(message, msg_text, parse_mode="Markdown", reply_markup=get_keyboard())
 
     elif text == "🚀 Start Automation":
         if state["status"] in ["IDLE", "SCHEDULED"]:
@@ -371,7 +381,8 @@ def handle_messages(message):
         bot.reply_to(message, "⏹️ Automation Reset.", reply_markup=get_keyboard())
         
     elif text == "📅 Schedule Automation":
-        bot.reply_to(message, "⏰ Send time (e.g., 02:30 PM).")
+        state["status"] = "WAITING_TIME"
+        bot.reply_to(message, "⏰ Send time (e.g., 02:30 PM).", reply_markup=get_back_keyboard())
         
     elif text == "❌ Cancel Schedule":
         state["status"] = "IDLE"
@@ -381,20 +392,14 @@ def handle_messages(message):
     elif text == "🧪 Spam Test":
         if state["status"] == "IDLE":
             state["status"] = "WAITING_TEST_EMAIL"
-            markup = ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.add(KeyboardButton("❌ Cancel Test"))
-            bot.reply_to(message, "📧 Send the email address to receive the test.", reply_markup=markup)
+            bot.reply_to(message, "📧 Send the email address to receive the test.", reply_markup=get_back_keyboard())
             
-    elif text == "❌ Cancel Test":
-        state["status"] = "IDLE"
-        bot.reply_to(message, "❌ Test Cancelled.", reply_markup=get_keyboard())
-        
     elif state["status"] == "WAITING_TEST_EMAIL":
         if "@" in text:
             state["status"] = "IDLE"
             threading.Thread(target=run_spam_test, args=(text,)).start()
         else:
-            bot.reply_to(message, "❌ Invalid email.")
+            bot.reply_to(message, "❌ Invalid email.", reply_markup=get_back_keyboard())
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
