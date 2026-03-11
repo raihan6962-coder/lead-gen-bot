@@ -121,21 +121,20 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
         bot.send_message(state["chat_id"], f"🔍 Searching Keyword: *{kw}*", parse_mode="Markdown")
 
         try:
-            # === AGGRESSIVE SEARCH (UPDATED) ===
-            # Try multiple search variations to maximize results
+            # === AGGRESSIVE SEARCH ===
             all_results = []
             search_variations = [kw, kw + " app", kw + " apps", kw + " free", kw + " android", kw + " mobile", kw + " best", kw + " top"]
             for var in search_variations:
                 try:
-                    raw = search(var, lang='en', country='us', n_hits=250)  # increased to 250
+                    raw = search(var, lang='en', country='us', n_hits=250)
                     all_results.extend(raw)
-                    time.sleep(0.5)  # small delay to avoid rate limits
+                    time.sleep(0.5)
                 except:
                     continue
-                if len(all_results) >= 500:  # enough results, stop early
+                if len(all_results) >= 500:
                     break
 
-            # Remove duplicates by appId
+            # Remove duplicates
             unique_results = []
             seen_ids = set()
             for r in all_results:
@@ -171,29 +170,30 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 # --- EMAIL CHECK ---
                 email = str(d.get('developerEmail', '')).strip().lower()
                 if not email:
-                    # Optional: could try to extract from website/description, but keep simple for now
-                    # bot.send_message(state["chat_id"], f"⏭️ Skipped {d['title']}: No email")
                     continue
                 if email in state["existing_emails"]:
-                    # bot.send_message(state["chat_id"], f"⏭️ Skipped {d['title']}: Already sent")
                     continue
 
-                # --- GOVERNMENT FILTER (RELAXED) ---
+                # --- GOVERNMENT FILTER ---
                 dev_name = str(d.get('developer', '')).lower()
-                # Only block if the whole developer name is exactly one of the keywords (less strict)
-                # Or if it starts/ends with them? For now, we still use substring but add exceptions.
-                # To reduce false positives, we check if the dev name *contains* a government word as a whole word.
-                import re
                 gov_pattern = r'\b(?:' + '|'.join(gov_keywords) + r')\b'
                 if re.search(gov_pattern, dev_name):
-                    # bot.send_message(state["chat_id"], f"⏭️ Skipped {d['title']}: Government developer")
                     continue
 
-                # --- RATING & INSTALLS FILTER (RELAXED) ---
-                rating = float(d.get('score', 0))
-                installs = int(d.get('minInstalls', 0))
+                # --- SAFE RATING & INSTALLS CONVERSION (FIX) ---
+                rating_str = d.get('score', 0)
+                try:
+                    rating = float(rating_str) if rating_str != '' else 0.0
+                except (ValueError, TypeError):
+                    rating = 0.0
 
-                # Removed rating > 0 condition – allow apps with no ratings
+                installs_str = d.get('minInstalls', 0)
+                try:
+                    installs = int(installs_str) if installs_str != '' else 0
+                except (ValueError, TypeError):
+                    installs = 0
+
+                # Apply filters
                 if rating <= max_rating and installs <= max_installs:
                     bot.send_message(state["chat_id"], f"✨ Lead Found: *{d['title']}*\nGenerating Email...", parse_mode="Markdown")
 
@@ -260,7 +260,6 @@ def start_engine():
 
         if not state["keywords"]:
             bot.send_message(state["chat_id"], "🧠 AI is generating keywords...")
-            # STRICT PROMPT FOR AI (No "keywords" word allowed)
             chat = groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": f"{res['keyword_prompt']} Niche: {res['niche']}. Give me 200 unique broad search terms separated by commas. DO NOT use the word 'keywords' in your response. DO NOT use numbers or bullet points."}],
                 model="llama-3.1-8b-instant",
