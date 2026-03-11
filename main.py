@@ -108,7 +108,45 @@ BODY: [Email Body]
     except:
         return f"Collaboration for {app_name}", f"Dear {dev_name},<br><br>Let's collaborate.<br><br>{contact_html}"
 
-# --- CORE ENGINE (FIXED) ---
+# --- SAFE NUMBER CONVERSION FUNCTIONS ---
+def safe_int_conversion(value, default=0):
+    """Safely convert any value to int, handling empty strings, commas, and None"""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        # Remove commas and any non-numeric characters except decimal point
+        cleaned = str(value).replace(',', '').strip()
+        if cleaned == '' or cleaned.lower() == 'none' or cleaned.lower() == 'null':
+            return default
+        # Extract first number found in string
+        numbers = re.findall(r'\d+', cleaned)
+        if numbers:
+            return int(numbers[0])
+        return default
+    except:
+        return default
+
+def safe_float_conversion(value, default=0.0):
+    """Safely convert any value to float, handling empty strings and commas"""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        cleaned = str(value).replace(',', '').strip()
+        if cleaned == '' or cleaned.lower() == 'none' or cleaned.lower() == 'null':
+            return default
+        # Extract first number found in string (including decimals)
+        numbers = re.findall(r'\d+\.?\d*', cleaned)
+        if numbers:
+            return float(numbers[0])
+        return default
+    except:
+        return default
+
+# --- CORE ENGINE (FULLY FIXED) ---
 def engine_thread(max_installs, max_rating, contact_info, email_prompt):
     global state
     gov_keywords = ['gov', 'government', 'ministry', 'department', 'state', 'council', 'national', 'authority']
@@ -150,13 +188,16 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 if state["status"] == "IDLE" or state["total_leads"] >= 200: break
 
                 # Check sender availability
-                senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
-                available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
-                if not available_senders:
-                    bot.send_message(state["chat_id"], "⚠️ All senders reached daily limit! Pausing.")
-                    state["status"] = "PAUSED"
-                    break
-                current_sender = available_senders[0]
+                try:
+                    senders = requests.post(SHEET_WEB_APP_URL, json={"action": "get_senders"}).json()
+                    available_senders = [s for s in senders if int(s['sent']) < int(s['limit'])]
+                    if not available_senders:
+                        bot.send_message(state["chat_id"], "⚠️ All senders reached daily limit! Pausing.")
+                        state["status"] = "PAUSED"
+                        break
+                    current_sender = available_senders[0]
+                except:
+                    continue
 
                 app_id = r['appId']
                 if app_id in state["scraped_apps"]: continue
@@ -169,7 +210,7 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
 
                 # --- EMAIL CHECK ---
                 email = str(d.get('developerEmail', '')).strip().lower()
-                if not email:
+                if not email or email == 'none' or email == 'null':
                     continue
                 if email in state["existing_emails"]:
                     continue
@@ -180,18 +221,9 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                 if re.search(gov_pattern, dev_name):
                     continue
 
-                # --- SAFE RATING & INSTALLS CONVERSION (FIX) ---
-                rating_str = d.get('score', 0)
-                try:
-                    rating = float(rating_str) if rating_str != '' else 0.0
-                except (ValueError, TypeError):
-                    rating = 0.0
-
-                installs_str = d.get('minInstalls', 0)
-                try:
-                    installs = int(installs_str) if installs_str != '' else 0
-                except (ValueError, TypeError):
-                    installs = 0
+                # --- SAFE RATING & INSTALLS CONVERSION (COMPLETELY FIXED) ---
+                rating = safe_float_conversion(d.get('score', 0))
+                installs = safe_int_conversion(d.get('minInstalls', 0))
 
                 # Apply filters
                 if rating <= max_rating and installs <= max_installs:
@@ -204,31 +236,37 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
                     )
 
                     # Save to sheet
-                    requests.post(SHEET_WEB_APP_URL, json={
-                        "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
-                        "email": email, "subject": subject, "body": body, "installs": installs,
-                        "rating": rating, "link": d['url'], "category": d.get('genre', ''),
-                        "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
-                    })
-                    state["existing_emails"].add(email)
+                    try:
+                        requests.post(SHEET_WEB_APP_URL, json={
+                            "action": "save_lead", "app_name": d['title'], "dev_name": d['developer'],
+                            "email": email, "subject": subject, "body": body, "installs": installs,
+                            "rating": rating, "link": d['url'], "category": d.get('genre', ''),
+                            "website": d.get('developerWebsite', ''), "updated": d.get('updated', '')
+                        })
+                        state["existing_emails"].add(email)
+                    except:
+                        continue
 
                     # Send email
-                    mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body})
-                    if mail_res.text == "Success":
-                        requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
-                        state["total_leads"] += 1
-                        leads_in_this_kw += 1
-                        bot.send_message(
-                            state["chat_id"],
-                            f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*",
-                            parse_mode="Markdown"
-                        )
+                    try:
+                        mail_res = requests.post(current_sender['url'], json={"action": "send_email", "to": email, "subject": subject, "body": body})
+                        if mail_res.text == "Success":
+                            requests.post(SHEET_WEB_APP_URL, json={"action": "increment_sender", "email": current_sender['email']})
+                            state["total_leads"] += 1
+                            leads_in_this_kw += 1
+                            bot.send_message(
+                                state["chat_id"],
+                                f"✅ Lead #{state['total_leads']} Sent to: {email}\n*(Sent via: {current_sender['email']})*",
+                                parse_mode="Markdown"
+                            )
 
-                        # Random delay between 60-120 seconds
-                        delay = random.randint(60, 120)
-                        for _ in range(delay):
-                            if state["status"] != "RUNNING": break
-                            time.sleep(1)
+                            # Random delay between 60-120 seconds
+                            delay = random.randint(60, 120)
+                            for _ in range(delay):
+                                if state["status"] != "RUNNING": break
+                                time.sleep(1)
+                    except:
+                        continue
 
             if leads_in_this_kw == 0:
                 bot.send_message(state["chat_id"], f"⚠️ No leads found for '{kw}'. Try adjusting filters.")
@@ -237,7 +275,7 @@ def engine_thread(max_installs, max_rating, contact_info, email_prompt):
 
         except Exception as e:
             print(f"Error in engine_thread: {e}")
-            bot.send_message(state["chat_id"], f"⚠️ Error while processing '{kw}': {e}")
+            bot.send_message(state["chat_id"], f"⚠️ Error while processing '{kw}': {str(e)[:50]}")
 
         if state["status"] == "RUNNING":
             state["current_kw_index"] += 1
@@ -252,16 +290,18 @@ def start_engine():
     try:
         bot.send_message(state["chat_id"], "🔄 Fetching settings and checking database...")
         res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_settings"}).json()
-        max_installs = int(str(res['max_installs']).replace(',', '').strip())
-        max_rating = float(str(res['max_rating']).strip())
+        
+        # SAFE CONVERSION FOR SETTINGS
+        max_installs = safe_int_conversion(res.get('max_installs', 0))
+        max_rating = safe_float_conversion(res.get('max_rating', 5.0))
 
         db_res = requests.post(SHEET_WEB_APP_URL, json={"action": "get_existing_emails"}).json()
-        state["existing_emails"] = set(db_res)
+        state["existing_emails"] = set(db_res) if db_res else set()
 
         if not state["keywords"]:
             bot.send_message(state["chat_id"], "🧠 AI is generating keywords...")
             chat = groq_client.chat.completions.create(
-                messages=[{"role": "user", "content": f"{res['keyword_prompt']} Niche: {res['niche']}. Give me 200 unique broad search terms separated by commas. DO NOT use the word 'keywords' in your response. DO NOT use numbers or bullet points."}],
+                messages=[{"role": "user", "content": f"{res.get('keyword_prompt', '')} Niche: {res.get('niche', '')}. Give me 200 unique broad search terms separated by commas. DO NOT use the word 'keywords' in your response. DO NOT use numbers or bullet points."}],
                 model="llama-3.1-8b-instant",
             )
             raw_kws = chat.choices[0].message.content.split(',')
@@ -277,10 +317,10 @@ def start_engine():
             state["scraped_apps"] = set()
             bot.send_message(state["chat_id"], f"✅ Generated {len(state['keywords'])} clean keywords!")
 
-        threading.Thread(target=engine_thread, args=(max_installs, max_rating, res['contact_info'], res['email_prompt'])).start()
+        threading.Thread(target=engine_thread, args=(max_installs, max_rating, res.get('contact_info', ''), res.get('email_prompt', ''))).start()
     except Exception as e:
         state["status"] = "IDLE"
-        bot.send_message(state["chat_id"], f"❌ System Error: {e}", reply_markup=get_keyboard())
+        bot.send_message(state["chat_id"], f"❌ System Error: {str(e)[:50]}", reply_markup=get_keyboard())
 
 def run_spam_test(test_email):
     bot.send_message(state["chat_id"], "🔄 Fetching data for Spam Test...")
