@@ -50,7 +50,7 @@ def kb():
         m.add(KeyboardButton("🚀 Start Automation"))
         m.add(KeyboardButton("📅 Schedules"),        KeyboardButton("🔑 Keywords"))
         m.add(KeyboardButton("🧪 Spam Test"),        KeyboardButton("📧 Senders"))
-        m.add(KeyboardButton("🔄 Refresh"))  # new refresh button
+        m.add(KeyboardButton("🔄 Refresh"))
     elif s in ["SCRAPING", "FILTERING", "EMAILING"]:
         m.add(KeyboardButton("🛑 Pause"),  KeyboardButton("⏹️ Stop"))
     elif s == "PAUSED":
@@ -218,7 +218,7 @@ def save_qualified_lead(row):
         return False
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE (with per-keyword filtering, deeper search)
+#  PHASE 1 — SCRAPE (with per-keyword filtering, deep search)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -268,11 +268,14 @@ def phase1_scrape():
              f"Already qualified emails: *{len(state['seen_emails'])}*\n"
              f"Starting scrape with {len(generated)} keywords.")
 
-        # More search variations for deeper scraping
+        # DEEP SEARCH: 20+ variations per keyword, n_hits=500
         search_variations = [
             "{kw}", "best {kw}", "top {kw}", "new {kw}", "{kw} app",
             "{kw} free", "{kw} pro", "{kw} lite", "{kw} 2025", "popular {kw}",
-            "{kw} for android", "{kw} download", "{kw} latest", "{kw} update"
+            "{kw} for android", "{kw} download", "{kw} latest", "{kw} update",
+            "{kw} reviews", "{kw} problems", "{kw} complaints",
+            "apps like {kw}", "similar to {kw}", "{kw} alternative",
+            "best {kw} apps", "top rated {kw}", "{kw} version"
         ]
 
         while state["kw_index"] < len(state["generated_kws"]):
@@ -287,11 +290,14 @@ def phase1_scrape():
             for q_template in search_variations:
                 q = q_template.format(kw=kw)
                 try:
-                    # Increase n_hits to 250 for more results
-                    results = search(q, lang='en', country='us', n_hits=250)
+                    # n_hits=500 to get maximum results
+                    results = search(q, lang='en', country='us', n_hits=500)
                     for r in results: raw_ids.append(r['appId'])
-                    time.sleep(0.3)  # slightly longer delay to avoid rate limits
-                except: continue
+                    # Random delay 1-3 seconds to avoid rate limits
+                    time.sleep(random.uniform(1, 3))
+                except Exception as e:
+                    print(f"Search error for '{q}': {e}")
+                    continue
 
             # Deduplicate against global scraped_ids
             seen_kw, ids = set(), []
