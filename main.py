@@ -87,7 +87,6 @@ def get_email(d):
 #  KEYWORD SET MANAGEMENT (via sheet)
 # ════════════════════════════════════════════════════════════
 def get_keyword_sets():
-    """returns list of {id, set_text, status} sorted by creation"""
     try:
         r = requests.post(SHEET_URL, json={"action":"get_keyword_sets"}, timeout=15)
         if r.status_code == 200:
@@ -146,13 +145,7 @@ def delete_schedule_time(time_str):
         print(f"delete_schedule_time error: {e}")
 
 # ════════════════════════════════════════════════════════════
-#  FULL AUTOMATION: Phase 1 → Phase 2
-# ════════════════════════════════════════════════════════════
-def run_full_automation():
-    phase1_scrape()
-
-# ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE ALL APPS USING CURRENT KEYWORD SET
+#  PHASE 1 — SCRAPE
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -300,7 +293,7 @@ def phase1_scrape():
         bot.send_message(cid, ".", reply_markup=kb())
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 2 — FILTER & EMAIL (updated email builder)
+#  PHASE 2 — FILTER & EMAIL (with improved email builder)
 # ════════════════════════════════════════════════════════════
 def phase2_filter_and_email():
     cid = state["chat_id"]
@@ -309,6 +302,7 @@ def phase2_filter_and_email():
         res          = requests.post(SHEET_URL, json={"action":"get_settings"}, timeout=20).json()
         max_installs = int(str(res.get('max_installs','100000')).replace(',','').strip())
         max_rating   = float(str(res.get('max_rating','4.5')).strip())
+        # contact_info and email_prompt are no longer used directly, but kept for compatibility
         contact_info = str(res.get('contact_info',''))
         email_prompt = str(res.get('email_prompt','Write a professional outreach email.'))
 
@@ -419,16 +413,16 @@ def phase2_filter_and_email():
             email  = str(row.get('email',''))
             esrc   = str(row.get('email_source','dev'))
 
-            # Use the updated email builder (new prompt)
-            subject, body = build_email_v2(row, sender['email'])
+            # Generate clean, short email with unsubscribe
+            subject, body_html = build_clean_email(row, sender['email'])
 
             try:
                 r2   = requests.post(sender['url'],
-                         json={"action":"send_email","to":email,"subject":subject,"body":body},
+                         json={"action":"send_email","to":email,"subject":subject,"body":body_html},
                          timeout=30)
                 resp = r2.text.strip()
             except Exception as se:
-                resp = f"Error: {se}"
+                resp = f"Connection error: {se}"
 
             if resp == "Success":
                 try:
@@ -469,11 +463,10 @@ def phase2_filter_and_email():
         send(f"❌ Phase 2 Error: {e}")
         bot.send_message(cid,".", reply_markup=kb())
 
-# ─── NEW EMAIL BUILDER (following the detailed prompt) ───────
-def build_email_v2(row, sender_email):
+# ─── CLEAN EMAIL BUILDER (short, with unsubscribe) ──────────
+def build_clean_email(row, sender_email):
     """
-    Generates a cold email strictly following the user's detailed prompt.
-    row contains all lead data.
+    Generates a short, professional cold email with unsubscribe link at the bottom.
     """
     app_name    = str(row.get('app_name','Unknown App'))
     dev_name    = str(row.get('dev_name','') or '').strip()
@@ -482,135 +475,119 @@ def build_email_v2(row, sender_email):
     rating      = float(row.get('rating') or 0.0)
     genre       = str(row.get('genre','') or '')
     website_url = str(row.get('website','') or '')
-    description = str(row.get('description','') or '')[:500]
+    description = str(row.get('description','') or '')[:300]
 
-    # Determine urgency based on rating
+    # Determine urgency
     if rating < 3.5:
-        urgency = "critical emergency"
-    elif 3.5 <= rating <= 4.0:
-        urgency = "moderate problem"
+        urgency = "critical"
+    elif rating < 4.0:
+        urgency = "moderate"
     else:
-        urgency = "urgent issue (recent bad reviews?)"
+        urgency = "noticing some recent reviews?"
 
     # Business impact based on genre
     genre_lower = genre.lower()
     if any(word in genre_lower for word in ['finance','bank','payment','fintech']):
-        impact = "bad reviews destroy user trust and kill new sign-ups"
+        impact = "hurts user trust and new sign-ups"
     elif any(word in genre_lower for word in ['shopping','delivery','ecommerce']):
-        impact = "users uninstall and switch to competitors"
+        impact = "can make users switch to competitors"
     elif any(word in genre_lower for word in ['game','gaming']):
-        impact = "reduces daily active users and tanks Play Store ranking"
+        impact = "reduces daily active users and ranking"
     else:
-        impact = "hurts downloads and user retention"
+        impact = "affects downloads and retention"
 
-    # Try to fetch website content for a genuine compliment
+    # Try to fetch a genuine compliment
     compliment = ""
     if website_url and "http" in website_url:
         try:
-            r = requests.get(website_url, timeout=5,
-                headers={"User-Agent":"Mozilla/5.0"})
+            r = requests.get(website_url, timeout=5, headers={"User-Agent":"Mozilla/5.0"})
             text = re.sub(r'<[^>]+',' ', r.text)
-            text = re.sub(r'\s+',' ', text).strip()[:400]
-            # Look for achievements: numbers, milestones, etc.
-            match = re.search(r'(\d+[\+,]?\s*(users?|downloads?|customers?|members?))', text, re.I)
+            text = re.sub(r'\s+',' ', text).strip()[:300]
+            match = re.search(r'(\d+[\+,]?\s*(users?|downloads?|customers?))', text, re.I)
             if match:
-                compliment = f"I noticed you've reached {match.group(0)} – that's impressive!"
+                compliment = f"Congrats on {match.group(0)}!"
             else:
-                # fallback to app description feature
+                # use first sentence of description
                 sentences = description.split('.')
-                if sentences:
-                    compliment = f"Your focus on {sentences[0].lower()} really stands out."
+                if sentences and len(sentences[0]) > 10:
+                    compliment = f"I like your focus on {sentences[0].lower()[:50]}."
         except:
-            compliment = f"I was impressed by your app's concept in the {genre} space."
+            compliment = f"Your app in the {genre} space looks interesting."
     else:
-        compliment = f"I was impressed by your app's concept in the {genre} space."
+        compliment = f"Your app in the {genre} space looks interesting."
 
     if not compliment:
-        compliment = f"I was impressed by your app's concept in the {genre} space."
+        compliment = f"Your app in the {genre} space looks interesting."
 
-    # Build the prompt for Groq
-    prompt = f"""You are an expert cold email copywriter working for Abu Raihan, who runs a professional Play Store review service.
+    # Build a very concise prompt
+    prompt = f"""Write a short cold email (max 120 words) to this developer:
 
-You have the following lead data (already fetched):
-- App Name: {app_name}
-- Developer: {dev_name}
-- Current Rating: {rating} ({urgency})
-- Genre: {genre}
-- Business impact for this genre: {impact}
-- Website/description snippet: {compliment}
+App: {app_name}
+Developer: {dev_name}
+Current rating: {rating} ({urgency})
+Genre: {genre}
+Impact: {impact}
+Compliment: {compliment}
 
-Write a cold email to this developer following these rules exactly:
-
-Subject line:
-- Must include the exact app name "{app_name}".
-- Must be personal and curious, under 50 characters.
-- Avoid any promotional words (free, offer, deal, etc.).
-
-Body structure:
-1. One sentence genuine compliment based on the website/description snippet above. Start directly, no greetings.
-2. One or two sentences stating the exact problem: their current rating {rating} and what that means.
-3. One or two sentences explaining the business impact: {impact}.
-4. Two or three sentences introducing Abu Raihan's service: helps apps recover from bad reviews by bringing in genuine positive reviews. Use natural language, not spammy.
-5. Soft call to action using BYAF principle: "if this sounds interesting, feel free to reply or message on WhatsApp/Telegram. No pressure at all."
-
-After the CTA, include this exact sign-off:
-
+Rules:
+- Subject: include app name, under 50 chars, no spam words.
+- Start with a one-sentence genuine compliment.
+- Then mention their rating and the problem it causes.
+- Briefly introduce Abu Raihan's service (helps recover ratings with genuine reviews).
+- Soft CTA: "If you're open to a quick chat, reply or message on WhatsApp."
+- End with sign-off:
 Best regards,
 Abu Raihan
 Play Store Review Service Specialist
-
 WhatsApp: +8801902911261
 Telegram: https://t.me/abu_raihan69
 
-Additional rules:
-- Never use any spam trigger words (free, guaranteed, click here, limited time, etc.).
-- Total body (excluding subject and sign-off) under 150 words.
-- Tone: warm, direct, confident, human.
-- No generic openers like "I hope this email finds you well".
-- Output format:
-  SUBJECT: [subject line]
-  [blank line]
-  [full email body including sign-off]
-
-After the email, add one line with "Spam risk: LOW" and one line with "Recommended send: Tuesday-Thursday 9-11am or 2-4pm recipient timezone"."""
+Output format:
+SUBJECT: ...
+[blank line]
+[email body]"""
 
     try:
         r = ai.chat.completions.create(
             messages=[{"role":"user","content":prompt}],
             model="llama-3.1-8b-instant",
-            max_tokens=800
+            max_tokens=400
         )
         content = r.choices[0].message.content.strip()
 
-        # Extract subject and body
         if "SUBJECT:" in content:
             parts = content.split("SUBJECT:", 1)[1].strip()
             subject = parts.split("\n", 1)[0].strip()
             body = parts.split("\n", 1)[1].strip() if "\n" in parts else ""
         else:
-            subject = f"Thought about {app_name} reviews"
+            subject = f"Quick question about {app_name}"
             body = content
 
-        # Convert line breaks to HTML <br> for email
+        # Convert to HTML with line breaks
         body_html = body.replace('\n\n','<br><br>').replace('\n','<br>')
-        full_html = f"""<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;color:#333;max-width:600px;margin:0 auto;">
-{body_html}</div>"""
+        # Add unsubscribe link at the very bottom
+        unsubscribe = f'<br><br><hr style="border:0;border-top:1px solid #eee;margin:16px 0;"><p style="text-align:center;font-size:11px;color:#bbb;"><a href="mailto:{sender_email}?subject=Unsubscribe&body=Remove me." style="color:#bbb;">Unsubscribe</a></p>'
+        full_html = f"""<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;color:#333;max-width:600px;margin:0 auto;">
+{body_html}{unsubscribe}</div>"""
         return subject, full_html
 
     except Exception as e:
-        print(f"Email build v2 error: {e}")
-        # Fallback simple email
+        print(f"Email build error: {e}")
+        # Fallback very short email
         fallback = f"""Dear {dev_name},<br><br>
-I came across {app_name} on the Play Store and noticed your current rating of {rating}. For a {genre} app, this can really impact user trust and growth.<br><br>
-We help developers like you recover from bad reviews by bringing in genuine positive reviews that restore your rating. If you're open to a quick chat, feel free to reply here or message me on WhatsApp.<br><br>
+I came across {app_name} and noticed your rating of {rating}. For a {genre} app, this can {impact}.<br><br>
+We help developers recover their rating with genuine reviews. If you're open to a quick chat, just reply or message me on WhatsApp.<br><br>
 Best regards,<br>
 Abu Raihan<br>
 Play Store Review Service Specialist<br><br>
 WhatsApp: +8801902911261<br>
 Telegram: https://t.me/abu_raihan69"""
-        return f"Quick question about {app_name}", f"<div>{fallback}</div>"
+        subject = f"Quick question about {app_name}"
+        unsubscribe = f'<br><br><hr style="border:0;border-top:1px solid #eee;margin:16px 0;"><p style="text-align:center;font-size:11px;color:#bbb;"><a href="mailto:{sender_email}?subject=Unsubscribe&body=Remove me." style="color:#bbb;">Unsubscribe</a></p>'
+        full_html = f"<div>{fallback}{unsubscribe}</div>"
+        return subject, full_html
 
-# ─── SPAM TEST (unchanged) ───────────────────────────────────
+# ─── SPAM TEST (uses new builder) ────────────────────────────
 def run_spam_test(test_email):
     send("🔄 Running Spam Test...")
     try:
@@ -620,7 +597,6 @@ def run_spam_test(test_email):
             bot.send_message(state["chat_id"],".", reply_markup=kb())
             return
         sender = senders[0]
-        # Use a fake row
         fake_row = {
             "app_name":"Demo Budget Tracker",
             "dev_name":"Indie Studio",
@@ -629,7 +605,7 @@ def run_spam_test(test_email):
             "website":"",
             "description":"A simple app to track daily expenses."
         }
-        subject, body = build_email_v2(fake_row, sender['email'])
+        subject, body = build_clean_email(fake_row, sender['email'])
         r2 = requests.post(sender['url'],
              json={"action":"send_email","to":test_email,"subject":subject,"body":body},
              timeout=30)
