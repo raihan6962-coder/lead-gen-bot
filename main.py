@@ -34,6 +34,7 @@ state = {
     "chat_id":        None,
     "tmp_url":        None,
     "tmp_email":      None,
+    "tmp_test_email": None,   # for spam test
     "current_set_id": None,
     "qualified_count":0,
     "seen_emails":    set(),
@@ -179,6 +180,7 @@ Return them as a comma-separated list. No numbers, no bullets, no explanations. 
         return terms
     except Exception as e:
         send(f"❌ Keyword generation failed: {e}")
+        # Fallback to just the base keyword
         return [base]
 
 # ════════════════════════════════════════════════════════════
@@ -377,7 +379,7 @@ def phase1_scrape():
                     except Exception as e:
                         print(f"Batch save error: {e}")
 
-                time.sleep(0.1)  # small delay between app details
+                time.sleep(0.1)
 
             if batch_raw:
                 try:
@@ -628,36 +630,49 @@ Telegram: https://t.me/abu_raihan69"""
         full_html = f"<div>{fallback}{unsubscribe}</div>"
         return subject, full_html
 
-# ─── SPAM TEST ────────────────────────────────────────────────
-def run_spam_test(test_email):
-    send("🔄 Running Spam Test...")
+# ─── SPAM TEST — with sender selection ───────────────────────
+def run_spam_test_with_sender(test_email, sender):
+    """Send test email using chosen sender."""
+    fake_row = {
+        "app_name":"Demo Budget Tracker",
+        "dev_name":"Indie Studio",
+        "rating":3.1,
+        "genre":"Finance",
+        "website":"",
+        "description":"A simple app to track daily expenses."
+    }
+    subject, body = build_clean_email(fake_row, sender['email'])
     try:
-        senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
-        if not senders:
-            send("❌ No senders! Add one first.")
-            bot.send_message(state["chat_id"],".", reply_markup=kb())
-            return
-        sender = senders[0]
-        fake_row = {
-            "app_name":"Demo Budget Tracker",
-            "dev_name":"Indie Studio",
-            "rating":3.1,
-            "genre":"Finance",
-            "website":"",
-            "description":"A simple app to track daily expenses."
-        }
-        subject, body = build_clean_email(fake_row, sender['email'])
         r2 = requests.post(sender['url'],
              json={"action":"send_email","to":test_email,"subject":subject,"body":body},
              timeout=30)
-        if r2.text.strip() == "Success":
+        resp = r2.text.strip()
+        if resp == "Success":
             send(f"✅ Test sent to `{test_email}` via {sender['email']}")
         else:
-            send(f"❌ Failed: {r2.text}")
-        bot.send_message(state["chat_id"],".", reply_markup=kb())
+            send(f"❌ Failed: {resp}")
     except Exception as e:
         send(f"❌ Error: {e}")
-        bot.send_message(state["chat_id"],".", reply_markup=kb())
+
+def show_sender_selection(test_email):
+    """Show inline keyboard with sender choices."""
+    try:
+        senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
+        if not senders:
+            send("❌ No senders available. Add one first.")
+            bot.send_message(state["chat_id"], ".", reply_markup=kb())
+            return
+        mk = InlineKeyboardMarkup()
+        for s in senders:
+            mk.add(InlineKeyboardButton(s['email'], callback_data=f"testsend_{s['email']}"))
+        mk.add(InlineKeyboardButton("🔙 Cancel", callback_data="cancel_test"))
+        bot.send_message(state["chat_id"], "📧 Choose a sender for the test email:", reply_markup=mk)
+        state["tmp_test_email"] = test_email
+        state["status"] = "WAITING_TEST_SENDER"
+    except Exception as e:
+        send(f"❌ Error fetching senders: {e}")
+        state["status"] = "IDLE"
+        bot.send_message(state["chat_id"], ".", reply_markup=kb())
 
 # ─── SCHEDULER — FIXED ───────────────────────────────────────
 def run_scheduler():
@@ -710,6 +725,7 @@ def welcome(message):
         "*📅 Schedules:* Set multiple daily run times (automation will start automatically).\n"
         "*🔑 Keywords:* Add keyword sets like `[crypto wallet] [travel app]` – they are used one by one.\n"
         "*📧 Senders:* Manage email sender accounts.\n"
+        "*🧪 Spam Test:* Test email with sender selection.\n"
         "*🔄 Refresh:* Show current status.\n\n"
         "Use the buttons below.",
         parse_mode="Markdown", reply_markup=kb())
@@ -775,6 +791,35 @@ def callbacks(call):
         bot.send_message(cid, f"🗑️ Deleted keyword set.", parse_mode="Markdown")
     elif d == "cancel":
         bot.send_message(cid,"Cancelled.")
+    elif d == "cancel_test":
+        state["status"] = "IDLE"
+        state["tmp_test_email"] = None
+        bot.send_message(cid, "Test cancelled.", reply_markup=kb())
+    elif d.startswith("testsend_"):
+        # User selected a sender for spam test
+        sender_email = d.split("testsend_")[1]
+        test_email = state.get("tmp_test_email")
+        if not test_email:
+            bot.send_message(cid, "❌ No test email in memory. Start over.")
+            state["status"] = "IDLE"
+            return
+        # Fetch sender details from sheet
+        try:
+            senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
+            sender = next((s for s in senders if s['email'] == sender_email), None)
+            if not sender:
+                bot.send_message(cid, "❌ Sender not found.")
+                state["status"] = "IDLE"
+                return
+        except:
+            bot.send_message(cid, "❌ Failed to fetch sender.")
+            state["status"] = "IDLE"
+            return
+        # Run test
+        bot.send_message(cid, f"Sending test to *{test_email}* via {sender_email}...", parse_mode="Markdown")
+        threading.Thread(target=run_spam_test_with_sender, args=(test_email, sender), daemon=True).start()
+        state["status"] = "IDLE"
+        state["tmp_test_email"] = None
 
 @bot.message_handler(func=lambda m: True)
 def handle(message):
@@ -785,6 +830,7 @@ def handle(message):
         state["status"]    = "IDLE"
         state["tmp_url"]   = None
         state["tmp_email"] = None
+        state["tmp_test_email"] = None
         bot.reply_to(message,"🔙 Main Menu.", reply_markup=kb())
         return
 
@@ -851,15 +897,16 @@ def handle(message):
         state["status"] = "IDLE"
         return
 
-    elif state["status"] == "WAITING_TEST":
+    elif state["status"] == "WAITING_TEST_EMAIL":
+        # User sent email address for spam test
         if "@" in text:
-            state["status"] = "IDLE"
-            bot.reply_to(message, f"Sending test to *{text}*...", parse_mode="Markdown")
-            threading.Thread(target=run_spam_test, args=(text,), daemon=True).start()
+            # Now show sender selection
+            show_sender_selection(text)
         else:
-            bot.reply_to(message,"❌ Invalid email.", reply_markup=back_kb())
+            bot.reply_to(message,"❌ Invalid email. Try again.", reply_markup=back_kb())
         return
 
+    # Main buttons
     if text == "🚀 Start Automation":
         if state["status"] == "IDLE":
             threading.Thread(target=phase1_scrape, daemon=True).start()
@@ -881,14 +928,18 @@ def handle(message):
 
     elif text == "⏹️ Stop":
         if state["status"] in ["SCRAPING","FILTERING","EMAILING","PAUSED"]:
+            # Permanent stop: reset state
             state["status"] = "IDLE"
             state["generated_kws"] = []
             state["kw_index"] = 0
             state["current_set_id"] = None
+            state["qualified_count"] = 0
+            # Note: scraped_ids and seen_emails are kept to avoid re-scraping duplicates later
             bot.reply_to(message,"⏹️ *Stopped.* Current keyword set remains pending.",
                 parse_mode="Markdown", reply_markup=kb())
 
     elif text == "⏹️ Reset":
+        # Full reset of all local data (but keyword sets in sheet remain)
         state.update({
             "status":"IDLE",
             "generated_kws":[],
@@ -937,8 +988,8 @@ def handle(message):
 
     elif text == "🧪 Spam Test":
         if state["status"] == "IDLE":
-            state["status"] = "WAITING_TEST"
-            bot.reply_to(message,"📧 Send test email address.", reply_markup=back_kb())
+            state["status"] = "WAITING_TEST_EMAIL"
+            bot.reply_to(message,"📧 Send the email address for the test.", reply_markup=back_kb())
 
     elif text == "📧 Senders":
         try:
