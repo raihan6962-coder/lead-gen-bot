@@ -62,10 +62,13 @@ def back_kb():
     return m
 
 def send(text, md="Markdown"):
-    try:    bot.send_message(state["chat_id"], text, parse_mode=md)
-    except:
-        try: bot.send_message(state["chat_id"], text)
-        except: pass
+    if state["chat_id"]:
+        try:    bot.send_message(state["chat_id"], text, parse_mode=md)
+        except:
+            try: bot.send_message(state["chat_id"], text)
+            except: pass
+    else:
+        print(f"[NO CHAT_ID] {text}")
 
 def parse_time(s):
     s = s.strip().upper()
@@ -228,6 +231,9 @@ def save_qualified_lead(row):
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
+    if not cid:
+        print("Cannot start phase1: no chat_id")
+        return
     state["status"] = "SCRAPING"
 
     try:
@@ -422,6 +428,9 @@ def phase1_scrape():
 def phase2_email_only():
     """Send emails to all qualified leads (already in sheet)."""
     cid = state["chat_id"]
+    if not cid:
+        print("Cannot start phase2: no chat_id")
+        return
 
     try:
         send("📧 *Starting email phase...* Loading pending qualified leads from sheet.")
@@ -671,18 +680,22 @@ def run_spam_test(test_email):
         send(f"❌ Error: {e}")
         bot.send_message(state["chat_id"],".", reply_markup=kb())
 
-# ─── SCHEDULER (FIXED) ───────────────────────────────────────
+# ─── SCHEDULER (FIXED with debug) ────────────────────────────
 def run_scheduler():
     tz = pytz.timezone('Asia/Dhaka')
-    send("⏰ Scheduler started. Will check every 10 seconds.")
+    # Send a startup message only if chat_id is known
+    if state["chat_id"]:
+        send("⏰ Scheduler started. Will check every 10 seconds.")
+    else:
+        print("Scheduler started, but no chat_id yet.")
     while True:
         try:
-            if state["status"] == "IDLE":
+            if state["status"] == "IDLE" and state["chat_id"]:
                 now = datetime.now(tz).strftime("%H:%M")
                 times = get_schedule_times()
                 if times:
-                    # Debug: send current time and scheduled times (optional, can be removed later)
-                    # send(f"🕒 Current time: {now}, Schedules: {times}")
+                    # Debug: optionally send current time and times (commented out to avoid spam)
+                    # send(f"🕒 Current: {now}, Schedules: {times}")
                     if now in times:
                         send(f"⏰ Scheduled time *{now}* detected – starting full automation...")
                         threading.Thread(target=phase1_scrape, daemon=True).start()
@@ -690,7 +703,11 @@ def run_scheduler():
                         time.sleep(61)
             time.sleep(10)
         except Exception as e:
-            send(f"❌ Scheduler error: {e}")
+            error_msg = f"❌ Scheduler error: {e}"
+            if state["chat_id"]:
+                send(error_msg)
+            else:
+                print(error_msg)
             time.sleep(10)
 
 # ─── BOT HANDLERS ────────────────────────────────────────────
