@@ -35,6 +35,8 @@ state = {
     "tmp_url":        None,
     "tmp_email":      None,
     "current_set_id": None,     # id of keyword set being processed
+    "qualified_count":0,        # counter for qualified leads collected so far
+    "seen_emails":    set(),    # emails already in qualified leads (to avoid duplicates)
 }
 
 GOV = ['gov','government','ministry','department','council',
@@ -179,13 +181,76 @@ Return them as a comma-separated list. No numbers, no bullets, no explanations. 
         return [base]
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE (with AI keyword generation)
+#  FILTER A SINGLE APP (returns True if qualified)
+# ════════════════════════════════════════════════════════════
+def is_qualified(app_dict, max_rating, max_installs, seen_emails):
+    dev = str(app_dict.get('dev_name','') or '').lower()
+    rating = float(app_dict.get('rating') or 0.0)
+    installs = int(app_dict.get('installs') or 0)
+    email = str(app_dict.get('email','') or '').strip().lower()
+
+    # Government skip
+    if any(g in dev for g in GOV):
+        return False, "gov"
+    # Zero rating skip
+    if rating == 0.0:
+        return False, "zero_rating"
+    # Rating filter
+    if rating > max_rating:
+        return False, "rating"
+    # Install filter
+    if installs > max_installs:
+        return False, "installs"
+    # Email check
+    if not email or '@' not in email:
+        return False, "no_email"
+    # Duplicate check
+    if email in seen_emails:
+        return False, "dup"
+    return True, "passed"
+
+# ════════════════════════════════════════════════════════════
+#  SAVE A SINGLE QUALIFIED LEAD TO SHEET
+# ════════════════════════════════════════════════════════════
+def save_qualified_lead(row):
+    """Save one qualified lead to the Qualified Leads sheet."""
+    try:
+        requests.post(SHEET_URL,
+            json={"action":"save_qualified_batch","rows":[row]},
+            timeout=15)
+        return True
+    except Exception as e:
+        print(f"Error saving qualified lead: {e}")
+        return False
+
+# ════════════════════════════════════════════════════════════
+#  PHASE 1 — SCRAPE (with per-keyword filtering)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
     state["status"] = "SCRAPING"
 
     try:
+        # Load filter settings
+        res = requests.post(SHEET_URL, json={"action":"get_settings"}, timeout=20).json()
+        max_installs = int(str(res.get('max_installs','100000')).replace(',','').strip())
+        max_rating   = float(str(res.get('max_rating','4.5')).strip())
+
+        # Load already scraped IDs
+        try:
+            existing = requests.post(SHEET_URL, json={"action":"get_scraped_ids"}, timeout=20).json()
+            state["scraped_ids"] = set(existing) if isinstance(existing, list) else set()
+        except:
+            state["scraped_ids"] = set()
+
+        # Load already qualified emails to avoid duplicates
+        try:
+            existing_emails = requests.post(SHEET_URL, json={"action":"get_qualified_emails"}, timeout=20).json()
+            state["seen_emails"] = set(existing_emails) if isinstance(existing_emails, list) else set()
+        except:
+            state["seen_emails"] = set()
+
+        # Get next keyword set
         set_id, base_kw = get_next_keyword_set()
         if not set_id:
             send("❌ No pending keyword sets. Add some first.")
@@ -194,6 +259,7 @@ def phase1_scrape():
             return
 
         state["current_set_id"] = set_id
+        state["qualified_count"] = 0
 
         # Generate 200 keywords from the base
         generated = generate_keywords_from_base(base_kw)
@@ -206,15 +272,9 @@ def phase1_scrape():
         state["kw_index"] = 0
         state["total_scraped"] = 0
 
-        # Load already scraped IDs
-        try:
-            existing = requests.post(SHEET_URL, json={"action":"get_scraped_ids"}, timeout=20).json()
-            state["scraped_ids"] = set(existing) if isinstance(existing, list) else set()
-        except:
-            state["scraped_ids"] = set()
-
         send(f"✅ Already in DB: *{len(state['scraped_ids'])}* apps\n"
-             f"Will skip these and only scrape new ones.")
+             f"Already qualified emails: *{len(state['seen_emails'])}*\n"
+             f"Starting scrape with {len(generated)} keywords.")
 
         # Iterate over generated keywords
         while state["kw_index"] < len(state["generated_kws"]):
@@ -235,7 +295,7 @@ def phase1_scrape():
                     time.sleep(0.2)
                 except: continue
 
-            # Deduplicate
+            # Deduplicate against global scraped_ids
             seen_kw, ids = set(), []
             for i in raw_ids:
                 if i not in seen_kw and i not in state["scraped_ids"]:
@@ -245,7 +305,8 @@ def phase1_scrape():
             send(f"📦 *{len(ids)}* new apps to fetch for `{kw}`")
 
             kw_count = 0
-            batch = []
+            batch_raw = []  # raw batch to save (all apps, regardless of qualification)
+            qualified_from_kw = 0
 
             for app_id in ids:
                 while state["status"] == "PAUSED": time.sleep(1)
@@ -272,7 +333,7 @@ def phase1_scrape():
                 url         = str(d.get('url','') or '')
                 privacy     = str(d.get('privacyPolicy','') or '')
 
-                batch.append({
+                app_dict = {
                     "app_id":      app_id,
                     "app_name":    title,
                     "dev_name":    dev,
@@ -288,46 +349,63 @@ def phase1_scrape():
                     "link":        url,
                     "updated":     updated,
                     "keyword":     kw
-                })
+                }
+
+                batch_raw.append(app_dict)
+
+                # Check qualification
+                qual, reason = is_qualified(app_dict, max_rating, max_installs, state["seen_emails"])
+                if qual:
+                    # Save to qualified leads immediately
+                    if save_qualified_lead(app_dict):
+                        state["seen_emails"].add(email)
+                        state["qualified_count"] += 1
+                        qualified_from_kw += 1
 
                 kw_count += 1
                 state["total_scraped"] += 1
 
-                if len(batch) >= 50:
+                # Save raw batch periodically
+                if len(batch_raw) >= 50:
                     try:
                         requests.post(SHEET_URL,
-                            json={"action":"save_raw_batch","rows":batch},
+                            json={"action":"save_raw_batch","rows":batch_raw},
                             timeout=30)
-                        send(f"💾 Saved batch | Total scraped: *{state['total_scraped']}*")
-                        batch = []
+                        send(f"💾 Saved raw batch | Total scraped: *{state['total_scraped']}*")
+                        batch_raw = []
                     except Exception as e:
                         print(f"Batch save error: {e}")
 
-                time.sleep(0.05)  # slightly faster
+                time.sleep(0.05)
 
-            if batch:
+            # Save remaining raw apps
+            if batch_raw:
                 try:
                     requests.post(SHEET_URL,
-                        json={"action":"save_raw_batch","rows":batch},
+                        json={"action":"save_raw_batch","rows":batch_raw},
                         timeout=30)
                 except: pass
 
-            send(f"✅ KW `{kw}` done — {kw_count} apps scraped\n"
-                 f"Total in DB: *{state['total_scraped']}*")
+            send(f"✅ KW `{kw}` done — {kw_count} apps scraped, {qualified_from_kw} qualified\n"
+                 f"Total scraped: *{state['total_scraped']}*, Total qualified so far: *{state['qualified_count']}*")
 
             state["kw_index"] += 1
 
-        # Phase 1 complete – mark set as used only if not stopped
+        # All keywords processed – mark set as used
         if state["status"] != "IDLE" and state["current_set_id"]:
             mark_keyword_set_used(state["current_set_id"])
             state["current_set_id"] = None
-            send(f"🎉 *Phase 1 Complete!* Total scraped: *{state['total_scraped']}*")
+            send(f"🎉 *Phase 1 Complete!* Total scraped: *{state['total_scraped']}*, Qualified leads: *{state['qualified_count']}*")
 
-            if state["status"] == "SCRAPING":
-                send("⏩ Automatically starting Phase 2 (Filter & Email)...")
-                state["status"] = "FILTERING"
-                threading.Thread(target=phase2_filter_and_email, daemon=True).start()
+            if state["status"] == "SCRAPING" and state["qualified_count"] > 0:
+                send("⏩ Automatically starting Phase 2 (Emailing qualified leads)...")
+                state["status"] = "EMAILING"
+                threading.Thread(target=phase2_email_only, daemon=True).start()
                 return
+            elif state["qualified_count"] == 0:
+                send("⚠️ No qualified leads found. Add more keywords or adjust filters.")
+                state["status"] = "IDLE"
+                bot.send_message(cid, ".", reply_markup=kb())
 
         if state["status"] != "PAUSED":
             state["status"] = "IDLE"
@@ -339,121 +417,67 @@ def phase1_scrape():
         bot.send_message(cid, ".", reply_markup=kb())
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 2 — FILTER & EMAIL (unchanged but with zero-rating skip)
+#  PHASE 2 — EMAIL ONLY (sends to all qualified leads)
 # ════════════════════════════════════════════════════════════
-def phase2_filter_and_email():
+def phase2_email_only():
+    """Send emails to all qualified leads (already in sheet)."""
     cid = state["chat_id"]
 
     try:
-        res          = requests.post(SHEET_URL, json={"action":"get_settings"}, timeout=20).json()
-        max_installs = int(str(res.get('max_installs','100000')).replace(',','').strip())
-        max_rating   = float(str(res.get('max_rating','4.5')).strip())
-        # contact_info and email_prompt are no longer used directly, but kept for compatibility
-        contact_info = str(res.get('contact_info',''))
-        email_prompt = str(res.get('email_prompt','Write a professional outreach email.'))
+        # Load settings (for contact info, prompt – not used but kept)
+        res = requests.post(SHEET_URL, json={"action":"get_settings"}, timeout=20).json()
+        # We'll use the existing qualified leads sheet
 
-        send(f"📊 *Phase 2 Starting*\n"
-             f"Filter: Rating ≤ `{max_rating}` (and > 0) | Installs ≤ `{max_installs:,}`\n"
-             f"Loading raw data from sheet...")
+        send("📧 *Starting email phase...* Loading qualified leads from sheet.")
 
-        raw_data = requests.post(SHEET_URL,
-            json={"action":"get_raw_leads"},
-            timeout=30).json()
+        # Get all qualified leads that are still "Pending"
+        # For simplicity, we'll fetch all and filter locally, but sheet doesn't have status column? Actually we have "Status" column in Qualified Leads.
+        # We'll fetch all qualified leads from sheet, but only those with status "Pending" (or not "Sent").
+        # We'll implement a new action to get pending qualified leads. But to keep it simple, we'll use the existing get_qualified_emails but we need full rows.
+        # Let's add a new action in Apps Script: get_pending_qualified_leads.
+        # Since we cannot modify Apps Script now, we'll assume we have a sheet and we'll fetch all qualified leads and filter by status locally? But we don't have status in the row data from previous calls.
+        # Actually in save_qualified_batch we added a "Status" column with "Pending". So we need to fetch those rows.
+        # We'll create a new function in Apps Script later. For now, we'll use the existing get_raw_leads but that's raw leads. Hmm.
 
-        if not raw_data or not isinstance(raw_data, list):
-            send("❌ No raw data found. Run Phase 1 first!")
+        # To avoid complicating, we'll use the approach: we have saved qualified leads during phase1, and we have the state["qualified_count"] but we don't have the actual rows in memory.
+        # We need to fetch them from sheet. Let's add a new action in Apps Script: get_pending_qualified_leads.
+        # I'll include that in the final Apps Script update. For now, I'll write the code assuming that action exists.
+
+        # But the user might not update Apps Script immediately. To make it work without new action, we can fetch all qualified leads and filter by status in Python if we have the status column. But we don't have that data from previous calls.
+        # Alternative: during phase1, we could store the qualified leads in a list and pass to email phase. That's simpler and avoids extra sheet calls.
+        # We'll do that: keep a list of qualified leads in memory during phase1, and then email from that list.
+        # But if the bot restarts, we lose that list. However, the qualified leads are also saved in sheet, so we could reload.
+        # For reliability, we'll combine: during phase1 we build a list of qualified leads, and at the end we start emailing from that list.
+        # But if the bot is stopped and resumed, we need to reload. We'll keep it simple: email phase will fetch all pending qualified leads from sheet using a new action.
+        # I'll provide the updated Apps Script with that action.
+
+        # For now, in this code, we'll assume we have a function get_pending_qualified_leads() that returns list of rows.
+        # I'll implement it below using a new action.
+
+        # Since we cannot change the Apps Script here, I'll write the code to use a new action, and later provide the updated Apps Script.
+
+        # For the sake of this response, I'll include the new action in the Apps Script at the end.
+
+        # But the user asked for code update, so I'll provide both main.py and the updated Apps Script with the new action.
+
+        # In the email phase below, I'll call a function to fetch pending qualified leads.
+
+        pending = get_pending_qualified_leads()
+        if not pending:
+            send("⚠️ No pending qualified leads found.")
             state["status"] = "IDLE"
-            bot.send_message(cid,".", reply_markup=kb())
+            bot.send_message(cid, ".", reply_markup=kb())
             return
 
-        send(f"📦 *{len(raw_data)}* raw apps loaded. Filtering now...")
+        send(f"📧 *Sending to {len(pending)} qualified leads*\nWaiting 1-2 min between each.")
 
-        qualified = []
-        seen_emails = set()
-
-        try:
-            existing = requests.post(SHEET_URL,
-                json={"action":"get_qualified_emails"},
-                timeout=20).json()
-            seen_emails = set(existing) if isinstance(existing, list) else set()
-        except:
-            seen_emails = set()
-
-        stats = {"gov":0, "rating":0, "installs":0, "no_email":0, "dup":0, "zero_rating":0, "passed":0}
-
-        for row in raw_data:
-            while state["status"] == "PAUSED": time.sleep(1)
-            if state["status"] == "IDLE": break
-
-            dev      = str(row.get('dev_name','') or '').lower()
-            rating   = float(row.get('rating') or 0.0)
-            installs = int(row.get('installs') or 0)
-            email    = str(row.get('email','') or '').strip().lower()
-
-            # Skip government
-            if any(g in dev for g in GOV):
-                stats["gov"] += 1
-                continue
-
-            # Skip zero rating (no reviews)
-            if rating == 0.0:
-                stats["zero_rating"] += 1
-                continue
-
-            # Rating filter
-            if rating > max_rating:
-                stats["rating"] += 1
-                continue
-
-            # Install filter
-            if installs > max_installs:
-                stats["installs"] += 1
-                continue
-
-            # Email check
-            if not email or '@' not in email:
-                stats["no_email"] += 1
-                continue
-
-            # Duplicate check
-            if email in seen_emails:
-                stats["dup"] += 1
-                continue
-
-            seen_emails.add(email)
-            qualified.append(row)
-            stats["passed"] += 1
-
-        send(f"✅ *Filter Complete!*\n"
-             f"Passed: *{stats['passed']}*\n"
-             f"Zero rating (skipped): {stats['zero_rating']}\n"
-             f"Rating fail: {stats['rating']} | Install fail: {stats['installs']}\n"
-             f"No email: {stats['no_email']} | Duplicate: {stats['dup']} | Gov: {stats['gov']}\n\n"
-             f"Saving qualified leads & starting emails...")
-
-        if not qualified:
-            send("⚠️ No qualified leads found. Adjust filter settings in Sheet and try again.")
-            state["status"] = "IDLE"
-            bot.send_message(cid,".", reply_markup=kb())
-            return
-
-        try:
-            requests.post(SHEET_URL,
-                json={"action":"save_qualified_batch","rows":qualified},
-                timeout=30)
-        except Exception as e:
-            send(f"⚠️ Could not save qualified leads: {e}")
-
-        state["status"]       = "EMAILING"
         state["total_emailed"] = 0
 
-        send(f"📧 *Starting email phase...*\n"
-             f"Sending to *{len(qualified)}* qualified leads\nWaiting 1-2 min between each.")
-
-        for row in qualified:
+        for row in pending:
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE": break
 
+            # Get available sender
             try:
                 senders   = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
                 available = [s for s in senders if int(s.get('sent',0)) < int(s.get('limit',1))]
@@ -470,7 +494,6 @@ def phase2_filter_and_email():
             email  = str(row.get('email',''))
             esrc   = str(row.get('email_source','dev'))
 
-            # Generate clean, short email with unsubscribe
             subject, body_html = build_clean_email(row, sender['email'])
 
             try:
@@ -508,17 +531,26 @@ def phase2_filter_and_email():
                 send(f"❌ Failed to `{email}`: {resp}")
 
         if state["status"] == "EMAILING":
-            send(f"🎉 *Full Automation Complete!*\n"
-                 f"Total emails sent: *{state['total_emailed']}*")
+            send(f"🎉 *Email Phase Complete!* Total emails sent: *{state['total_emailed']}*")
             state["status"] = "IDLE"
-            bot.send_message(cid,".", reply_markup=kb())
+            bot.send_message(cid, ".", reply_markup=kb())
         elif state["status"] == "PAUSED":
             bot.send_message(cid, "⏸️ Paused during email phase.", reply_markup=kb())
 
     except Exception as e:
         state["status"] = "IDLE"
-        send(f"❌ Phase 2 Error: {e}")
-        bot.send_message(cid,".", reply_markup=kb())
+        send(f"❌ Email Phase Error: {e}")
+        bot.send_message(cid, ".", reply_markup=kb())
+
+def get_pending_qualified_leads():
+    """Fetch all pending qualified leads from sheet."""
+    try:
+        r = requests.post(SHEET_URL, json={"action":"get_pending_qualified_leads"}, timeout=30)
+        if r.status_code == 200:
+            return r.json() if isinstance(r.json(), list) else []
+    except:
+        pass
+    return []
 
 # ─── CLEAN EMAIL BUILDER (short, with unsubscribe) ──────────
 def build_clean_email(row, sender_email):
@@ -686,7 +718,7 @@ def run_scheduler():
                 if now in times:
                     send(f"⏰ Scheduled time *{now}* – starting full automation...")
                     threading.Thread(target=phase1_scrape, daemon=True).start()
-                    time.sleep(61)  # avoid re-triggering in same minute
+                    time.sleep(61)
         except Exception as e:
             print(f"Scheduler error: {e}")
         time.sleep(10)
@@ -891,7 +923,9 @@ def handle(message):
             "scraped_ids":set(),
             "total_scraped":0,
             "total_emailed":0,
-            "current_set_id": None
+            "current_set_id": None,
+            "qualified_count":0,
+            "seen_emails":set()
         })
         bot.reply_to(message,"⏹️ *Fully reset.*", parse_mode="Markdown", reply_markup=kb())
 
