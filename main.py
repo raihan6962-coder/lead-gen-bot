@@ -50,6 +50,7 @@ def kb():
         m.add(KeyboardButton("🚀 Start Automation"))
         m.add(KeyboardButton("📅 Schedules"),        KeyboardButton("🔑 Keywords"))
         m.add(KeyboardButton("🧪 Spam Test"),        KeyboardButton("📧 Senders"))
+        m.add(KeyboardButton("🔄 Refresh"))  # new refresh button
     elif s in ["SCRAPING", "FILTERING", "EMAILING"]:
         m.add(KeyboardButton("🛑 Pause"),  KeyboardButton("⏹️ Stop"))
     elif s == "PAUSED":
@@ -129,59 +130,13 @@ def get_next_keyword_set():
 #  SCHEDULE MANAGEMENT (via sheet)
 # ════════════════════════════════════════════════════════════
 def get_schedule_times():
-    """
-    Fetch schedule times from Sheet and normalize everything to "HH:MM" strings.
-    Handles: plain "14:30", "14:30:00", Date objects serialized as strings, float fractions.
-    """
     try:
         r = requests.post(SHEET_URL, json={"action":"get_schedule_times"}, timeout=15)
-        if r.status_code != 200:
-            return []
-        raw = r.json()
-        if not isinstance(raw, list):
-            return []
-
-        cleaned = []
-        for item in raw:
-            t = str(item).strip()
-
-            # Case 1: "HH:MM" or "H:MM"
-            m = re.match(r'^(\d{1,2}):(\d{2})$', t)
-            if m:
-                cleaned.append(f"{int(m.group(1)):02d}:{m.group(2)}")
-                continue
-
-            # Case 2: "HH:MM:SS" — Apps Script sometimes serializes time this way
-            m = re.match(r'^(\d{1,2}):(\d{2}):\d{2}', t)
-            if m:
-                cleaned.append(f"{int(m.group(1)):02d}:{m.group(2)}")
-                continue
-
-            # Case 3: Full date-time string e.g. "Sat Dec 30 1899 14:30:00 GMT+0000"
-            m = re.search(r'(\d{1,2}):(\d{2}):\d{2}', t)
-            if m:
-                cleaned.append(f"{int(m.group(1)):02d}:{m.group(2)}")
-                continue
-
-            # Case 4: Float fraction of day (e.g. 0.6041666... = 14:30)
-            try:
-                fval = float(t)
-                if 0.0 <= fval < 1.0:
-                    total_min = round(fval * 24 * 60)
-                    h  = (total_min // 60) % 24
-                    mn = total_min % 60
-                    cleaned.append(f"{h:02d}:{mn:02d}")
-                    continue
-            except:
-                pass
-
-            print(f"[Scheduler] Could not parse time value: {repr(item)}")
-
-        return cleaned
-
+        if r.status_code == 200:
+            return r.json() if isinstance(r.json(), list) else []
     except Exception as e:
         print(f"get_schedule_times error: {e}")
-        return []
+    return []
 
 def add_schedule_time(time_str):
     try:
@@ -263,7 +218,7 @@ def save_qualified_lead(row):
         return False
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE (with per-keyword filtering)
+#  PHASE 1 — SCRAPE (with per-keyword filtering, deeper search)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -313,6 +268,13 @@ def phase1_scrape():
              f"Already qualified emails: *{len(state['seen_emails'])}*\n"
              f"Starting scrape with {len(generated)} keywords.")
 
+        # More search variations for deeper scraping
+        search_variations = [
+            "{kw}", "best {kw}", "top {kw}", "new {kw}", "{kw} app",
+            "{kw} free", "{kw} pro", "{kw} lite", "{kw} 2025", "popular {kw}",
+            "{kw} for android", "{kw} download", "{kw} latest", "{kw} update"
+        ]
+
         while state["kw_index"] < len(state["generated_kws"]):
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE":
@@ -322,14 +284,16 @@ def phase1_scrape():
             send(f"🔍 *KW {state['kw_index']+1}/{len(state['generated_kws'])}:* `{kw}`")
 
             raw_ids = []
-            for q in [kw, f"{kw} app", f"{kw} free", f"best {kw}",
-                      f"new {kw}", f"{kw} simple", f"{kw} lite", f"{kw} basic"]:
+            for q_template in search_variations:
+                q = q_template.format(kw=kw)
                 try:
-                    results = search(q, lang='en', country='us', n_hits=100)
+                    # Increase n_hits to 250 for more results
+                    results = search(q, lang='en', country='us', n_hits=250)
                     for r in results: raw_ids.append(r['appId'])
-                    time.sleep(0.2)
+                    time.sleep(0.3)  # slightly longer delay to avoid rate limits
                 except: continue
 
+            # Deduplicate against global scraped_ids
             seen_kw, ids = set(), []
             for i in raw_ids:
                 if i not in seen_kw and i not in state["scraped_ids"]:
@@ -407,7 +371,7 @@ def phase1_scrape():
                     except Exception as e:
                         print(f"Batch save error: {e}")
 
-                time.sleep(0.05)
+                time.sleep(0.1)  # small delay between app details
 
             if batch_raw:
                 try:
@@ -689,12 +653,7 @@ def run_spam_test(test_email):
         send(f"❌ Error: {e}")
         bot.send_message(state["chat_id"],".", reply_markup=kb())
 
-# ════════════════════════════════════════════════════════════
-#  SCHEDULER — FIXED
-#  Old bug: Sheet returns time as Date/float, "now in times" never matched.
-#  Fix 1: get_schedule_times() now normalizes all formats to "HH:MM" string.
-#  Fix 2: triggered_today dict prevents double-trigger within same minute.
-# ════════════════════════════════════════════════════════════
+# ─── SCHEDULER — FIXED ───────────────────────────────────────
 def run_scheduler():
     tz = pytz.timezone('Asia/Dhaka')
     print("⏰ Scheduler thread started.")
@@ -707,7 +666,7 @@ def run_scheduler():
             today  = now_dt.strftime("%Y-%m-%d")
 
             if state["status"] == "IDLE" and state["chat_id"]:
-                times = get_schedule_times()  # already returns clean "HH:MM" list
+                times = get_schedule_times()
                 print(f"[Scheduler] now={now_hm} | schedules={times}")
 
                 for t in times:
@@ -723,6 +682,17 @@ def run_scheduler():
 
         time.sleep(10)
 
+# ─── REFRESH COMMAND ─────────────────────────────────────────
+def refresh_status():
+    """Send current status and pending keyword count."""
+    sets = get_keyword_sets()
+    pending = [s for s in sets if s.get('status') == 'pending']
+    send(f"🔄 *Refresh*\n"
+         f"Status: {state['status']}\n"
+         f"Pending keyword sets: {len(pending)}\n"
+         f"Total scraped so far: {state['total_scraped']}\n"
+         f"Total emailed: {state['total_emailed']}")
+
 # ─── BOT HANDLERS ────────────────────────────────────────────
 @bot.message_handler(commands=['start'])
 def welcome(message):
@@ -733,7 +703,8 @@ def welcome(message):
         "*🚀 Start Automation:* Runs full workflow – scrape + filter + email – using next pending keyword set.\n"
         "*📅 Schedules:* Set multiple daily run times (automation will start automatically).\n"
         "*🔑 Keywords:* Add keyword sets like `[crypto wallet] [travel app]` – they are used one by one.\n"
-        "*📧 Senders:* Manage email sender accounts.\n\n"
+        "*📧 Senders:* Manage email sender accounts.\n"
+        "*🔄 Refresh:* Show current status.\n\n"
         "Use the buttons below.",
         parse_mode="Markdown", reply_markup=kb())
 
@@ -924,6 +895,9 @@ def handle(message):
             "seen_emails":set()
         })
         bot.reply_to(message,"⏹️ *Fully reset.*", parse_mode="Markdown", reply_markup=kb())
+
+    elif text == "🔄 Refresh":
+        refresh_status()
 
     elif text == "📅 Schedules":
         times = get_schedule_times()
