@@ -34,7 +34,7 @@ state = {
     "chat_id":        None,
     "tmp_url":        None,
     "tmp_email":      None,
-    "tmp_test_email": None,   # for spam test
+    "tmp_test_email": None,
     "current_set_id": None,
     "qualified_count":0,
     "seen_emails":    set(),
@@ -152,10 +152,44 @@ def delete_schedule_time(time_str):
         print(f"delete_schedule_time error: {e}")
 
 # ════════════════════════════════════════════════════════════
-#  AI KEYWORD GENERATION
+#  AI KEYWORD GENERATION with FALLBACK
 # ════════════════════════════════════════════════════════════
+def fallback_keywords(base):
+    """Generate 200 keywords using templates when Groq fails."""
+    templates = [
+        "{base}", "best {base}", "top {base}", "new {base}", "{base} app",
+        "{base} free", "{base} pro", "{base} lite", "{base} 2025", "popular {base}",
+        "{base} for android", "{base} download", "{base} latest", "{base} update",
+        "{base} reviews", "{base} problems", "{base} complaints",
+        "apps like {base}", "similar to {base}", "{base} alternative",
+        "best {base} apps", "top rated {base}", "{base} version",
+        "{base} online", "{base} offline", "{base} premium", "{base} paid",
+        "{base} cheap", "{base} expensive", "{base} rating", "{base} store",
+        "{base} guide", "{base} tutorial", "{base} help", "{base} support",
+        "{base} community", "{base} forum", "{base} discussion"
+    ]
+    # Expand to 200 by adding numbers, adjectives, etc.
+    result = []
+    for i in range(1, 201):
+        tmpl = templates[i % len(templates)]
+        word = tmpl.format(base=base)
+        # Add some variation
+        if i % 3 == 0:
+            word = f"{word} {i}"
+        elif i % 5 == 0:
+            word = f"best {word}"
+        result.append(word)
+    # Remove duplicates
+    seen = set()
+    unique = []
+    for w in result:
+        if w not in seen:
+            seen.add(w)
+            unique.append(w)
+    return unique[:200]
+
 def generate_keywords_from_base(base):
-    """Use Groq to generate 200 related search terms from a base keyword."""
+    """Use Groq to generate 200 related search terms from a base keyword. Fallback if fails."""
     send(f"🧠 Generating 200 keywords from '{base}'...")
     prompt = f"""Generate 200 unique, short search terms (2-5 words each) related to "{base}" that people might type into Google Play Store.
 Return them as a comma-separated list. No numbers, no bullets, no explanations. Just the terms."""
@@ -173,15 +207,18 @@ Return them as a comma-separated list. No numbers, no bullets, no explanations. 
             if 2 < len(t) < 60 and t not in terms:
                 terms.append(t)
         if len(terms) < 10:
-            terms = [base, f"best {base}", f"top {base}", f"new {base}", f"{base} app",
-                     f"{base} free", f"{base} pro", f"{base} lite", f"{base} 2025",
-                     f"popular {base}"]
+            # fallback if AI returns too few
+            terms = fallback_keywords(base)
+        else:
+            # trim to 200
+            terms = terms[:200]
         send(f"✅ Generated {len(terms)} keywords.")
         return terms
     except Exception as e:
-        send(f"❌ Keyword generation failed: {e}")
-        # Fallback to just the base keyword
-        return [base]
+        send(f"❌ Groq failed: {e}. Using fallback generator.")
+        fallback = fallback_keywords(base)
+        send(f"✅ Generated {len(fallback)} fallback keywords.")
+        return fallback
 
 # ════════════════════════════════════════════════════════════
 #  FILTER A SINGLE APP (returns True if qualified)
@@ -228,6 +265,7 @@ def phase1_scrape():
         print("Cannot start phase1: no chat_id")
         return
     state["status"] = "SCRAPING"
+    bot.send_message(cid, "🔄 Automation started. Use buttons below.", reply_markup=kb())
 
     try:
         res = requests.post(SHEET_URL, json={"action":"get_settings"}, timeout=20).json()
@@ -260,6 +298,7 @@ def phase1_scrape():
         if not generated:
             send("❌ No keywords generated. Aborting.")
             state["status"] = "IDLE"
+            bot.send_message(cid, ".", reply_markup=kb())
             return
 
         state["generated_kws"] = generated
@@ -282,7 +321,7 @@ def phase1_scrape():
 
         while state["kw_index"] < len(state["generated_kws"]):
             while state["status"] == "PAUSED": time.sleep(1)
-            if state["status"] == "IDLE":
+            if state["status"] == "IDLE":  # Stop pressed
                 return
 
             kw = state["generated_kws"][state["kw_index"]]
@@ -292,16 +331,13 @@ def phase1_scrape():
             for q_template in search_variations:
                 q = q_template.format(kw=kw)
                 try:
-                    # n_hits=500 to get maximum results
                     results = search(q, lang='en', country='us', n_hits=500)
                     for r in results: raw_ids.append(r['appId'])
-                    # Random delay 1-3 seconds to avoid rate limits
                     time.sleep(random.uniform(1, 3))
                 except Exception as e:
                     print(f"Search error for '{q}': {e}")
                     continue
 
-            # Deduplicate against global scraped_ids
             seen_kw, ids = set(), []
             for i in raw_ids:
                 if i not in seen_kw and i not in state["scraped_ids"]:
@@ -401,6 +437,7 @@ def phase1_scrape():
             if state["status"] == "SCRAPING" and state["qualified_count"] > 0:
                 send("⏩ Automatically starting Phase 2 (Emailing qualified leads)...")
                 state["status"] = "EMAILING"
+                bot.send_message(cid, ".", reply_markup=kb())
                 threading.Thread(target=phase2_email_only, daemon=True).start()
                 return
             elif state["qualified_count"] == 0:
@@ -418,7 +455,7 @@ def phase1_scrape():
         bot.send_message(cid, ".", reply_markup=kb())
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 2 — EMAIL ONLY (sends to all qualified leads)
+#  PHASE 2 — EMAIL ONLY (with automatic sender switching)
 # ════════════════════════════════════════════════════════════
 def phase2_email_only():
     cid = state["chat_id"]
@@ -445,32 +482,42 @@ def phase2_email_only():
             if state["status"] == "IDLE": break
 
             try:
-                senders   = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
+                senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
+                # Filter available senders (sent < limit)
                 available = [s for s in senders if int(s.get('sent',0)) < int(s.get('limit',1))]
-            except:
+            except Exception as e:
+                print(f"Error fetching senders: {e}")
                 time.sleep(3)
                 continue
 
             if not available:
+                # Diagnostic: show all senders status
+                debug = "⚠️ No available senders. Current statuses:\n"
+                for s in senders:
+                    debug += f"{s['email']}: {s.get('sent',0)}/{s.get('limit',0)}\n"
+                send(debug)
                 send("⚠️ All senders hit daily limit! Pausing.")
                 state["status"] = "PAUSED"
+                bot.send_message(cid, ".", reply_markup=kb())
                 break
 
+            # Pick the first available sender (you could also randomize)
             sender = available[0]
-            email  = str(row.get('email',''))
-            esrc   = str(row.get('email_source','dev'))
+            email = str(row.get('email',''))
+            esrc = str(row.get('email_source','dev'))
 
             subject, body_html = build_clean_email(row, sender['email'])
 
             try:
-                r2   = requests.post(sender['url'],
-                         json={"action":"send_email","to":email,"subject":subject,"body":body_html},
-                         timeout=30)
+                r2 = requests.post(sender['url'],
+                     json={"action":"send_email","to":email,"subject":subject,"body":body_html},
+                     timeout=30)
                 resp = r2.text.strip()
             except Exception as se:
                 resp = f"Connection error: {se}"
 
             if resp == "Success":
+                # Increment sender count and mark email as sent
                 try:
                     requests.post(SHEET_URL,
                         json={"action":"increment_sender","email":sender['email']},
@@ -478,7 +525,8 @@ def phase2_email_only():
                     requests.post(SHEET_URL,
                         json={"action":"mark_emailed","email":email},
                         timeout=15)
-                except: pass
+                except Exception as e:
+                    print(f"Error updating sheet after send: {e}")
 
                 state["total_emailed"] += 1
                 etag = {"dev":"📧","support":"📩","extracted":"📬"}.get(esrc,"📬")
@@ -495,6 +543,7 @@ def phase2_email_only():
                     time.sleep(1)
             else:
                 send(f"❌ Failed to `{email}`: {resp}")
+                # Optionally, we could try another sender for the same lead, but for simplicity we just move to next lead
 
         if state["status"] == "EMAILING":
             send(f"🎉 *Email Phase Complete!* Total emails sent: *{state['total_emailed']}*")
@@ -632,7 +681,6 @@ Telegram: https://t.me/abu_raihan69"""
 
 # ─── SPAM TEST — with sender selection ───────────────────────
 def run_spam_test_with_sender(test_email, sender):
-    """Send test email using chosen sender."""
     fake_row = {
         "app_name":"Demo Budget Tracker",
         "dev_name":"Indie Studio",
@@ -655,7 +703,6 @@ def run_spam_test_with_sender(test_email, sender):
         send(f"❌ Error: {e}")
 
 def show_sender_selection(test_email):
-    """Show inline keyboard with sender choices."""
     try:
         senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
         if not senders:
@@ -674,7 +721,7 @@ def show_sender_selection(test_email):
         state["status"] = "IDLE"
         bot.send_message(state["chat_id"], ".", reply_markup=kb())
 
-# ─── SCHEDULER — FIXED ───────────────────────────────────────
+# ─── SCHEDULER ───────────────────────────────────────────────
 def run_scheduler():
     tz = pytz.timezone('Asia/Dhaka')
     print("⏰ Scheduler thread started.")
@@ -694,9 +741,8 @@ def run_scheduler():
                     if t == now_hm and triggered_today.get(t) != today:
                         triggered_today[t] = today
                         send(f"⏰ Scheduled time *{t}* — starting automation...")
-                        bot.send_message(state["chat_id"], ".", reply_markup=kb())
                         threading.Thread(target=phase1_scrape, daemon=True).start()
-                        break  # one trigger per loop
+                        break
 
         except Exception as e:
             print(f"[Scheduler] Error: {e}")
@@ -705,7 +751,6 @@ def run_scheduler():
 
 # ─── REFRESH COMMAND ─────────────────────────────────────────
 def refresh_status():
-    """Send current status and pending keyword count."""
     sets = get_keyword_sets()
     pending = [s for s in sets if s.get('status') == 'pending']
     send(f"🔄 *Refresh*\n"
@@ -796,14 +841,12 @@ def callbacks(call):
         state["tmp_test_email"] = None
         bot.send_message(cid, "Test cancelled.", reply_markup=kb())
     elif d.startswith("testsend_"):
-        # User selected a sender for spam test
         sender_email = d.split("testsend_")[1]
         test_email = state.get("tmp_test_email")
         if not test_email:
             bot.send_message(cid, "❌ No test email in memory. Start over.")
             state["status"] = "IDLE"
             return
-        # Fetch sender details from sheet
         try:
             senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
             sender = next((s for s in senders if s['email'] == sender_email), None)
@@ -815,7 +858,6 @@ def callbacks(call):
             bot.send_message(cid, "❌ Failed to fetch sender.")
             state["status"] = "IDLE"
             return
-        # Run test
         bot.send_message(cid, f"Sending test to *{test_email}* via {sender_email}...", parse_mode="Markdown")
         threading.Thread(target=run_spam_test_with_sender, args=(test_email, sender), daemon=True).start()
         state["status"] = "IDLE"
@@ -898,9 +940,7 @@ def handle(message):
         return
 
     elif state["status"] == "WAITING_TEST_EMAIL":
-        # User sent email address for spam test
         if "@" in text:
-            # Now show sender selection
             show_sender_selection(text)
         else:
             bot.reply_to(message,"❌ Invalid email. Try again.", reply_markup=back_kb())
@@ -914,8 +954,7 @@ def handle(message):
     elif text == "🛑 Pause":
         if state["status"] in ["SCRAPING","FILTERING","EMAILING"]:
             state["status"] = "PAUSED"
-            bot.reply_to(message,"🛑 *Paused.* Progress saved.",
-                parse_mode="Markdown", reply_markup=kb())
+            bot.reply_to(message,"🛑 *Paused.* Progress saved.", reply_markup=kb())
 
     elif text == "▶️ Resume":
         if state["status"] == "PAUSED":
@@ -923,23 +962,18 @@ def handle(message):
                 state["status"] = "SCRAPING"
             else:
                 state["status"] = "EMAILING"
-            bot.reply_to(message,"▶️ *Resuming...*",
-                parse_mode="Markdown", reply_markup=kb())
+            bot.reply_to(message,"▶️ *Resuming...*", reply_markup=kb())
 
     elif text == "⏹️ Stop":
         if state["status"] in ["SCRAPING","FILTERING","EMAILING","PAUSED"]:
-            # Permanent stop: reset state
             state["status"] = "IDLE"
             state["generated_kws"] = []
             state["kw_index"] = 0
             state["current_set_id"] = None
             state["qualified_count"] = 0
-            # Note: scraped_ids and seen_emails are kept to avoid re-scraping duplicates later
-            bot.reply_to(message,"⏹️ *Stopped.* Current keyword set remains pending.",
-                parse_mode="Markdown", reply_markup=kb())
+            bot.reply_to(message,"⏹️ *Stopped.* Current keyword set remains pending.", reply_markup=kb())
 
     elif text == "⏹️ Reset":
-        # Full reset of all local data (but keyword sets in sheet remain)
         state.update({
             "status":"IDLE",
             "generated_kws":[],
@@ -951,7 +985,7 @@ def handle(message):
             "qualified_count":0,
             "seen_emails":set()
         })
-        bot.reply_to(message,"⏹️ *Fully reset.*", parse_mode="Markdown", reply_markup=kb())
+        bot.reply_to(message,"⏹️ *Fully reset.*", reply_markup=kb())
 
     elif text == "🔄 Refresh":
         refresh_status()
