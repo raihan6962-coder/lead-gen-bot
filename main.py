@@ -38,7 +38,7 @@ state = {
     "current_set_id": None,
     "qualified_count":0,
     "seen_emails":    set(),
-    "settings":       {},  # cache settings to avoid repeated fetches
+    "settings":       {},
 }
 
 GOV = ['gov','government','ministry','department','council',
@@ -95,7 +95,6 @@ def get_email(d):
 #  FETCH SETTINGS (cached for the run)
 # ════════════════════════════════════════════════════════════
 def get_settings():
-    """Fetch settings from sheet and cache in state."""
     if state["settings"]:
         return state["settings"]
     try:
@@ -108,7 +107,7 @@ def get_settings():
     return {}
 
 # ════════════════════════════════════════════════════════════
-#  KEYWORD SET MANAGEMENT (via sheet)
+#  KEYWORD SET MANAGEMENT
 # ════════════════════════════════════════════════════════════
 def get_keyword_sets():
     try:
@@ -145,7 +144,7 @@ def get_next_keyword_set():
     return None, None
 
 # ════════════════════════════════════════════════════════════
-#  SCHEDULE MANAGEMENT (via sheet)
+#  SCHEDULE MANAGEMENT
 # ════════════════════════════════════════════════════════════
 def get_schedule_times():
     try:
@@ -169,10 +168,11 @@ def delete_schedule_time(time_str):
         print(f"delete_schedule_time error: {e}")
 
 # ════════════════════════════════════════════════════════════
-#  AI KEYWORD GENERATION with PROMPT from SETTINGS
+#  AI KEYWORD GENERATION with IMPROVED FALLBACK (200 keywords)
 # ════════════════════════════════════════════════════════════
 def fallback_keywords(base):
-    """Generate 200 keywords using templates when Groq fails."""
+    """Generate exactly 200 unique keywords using templates when Groq fails."""
+    # Extensive list of templates to ensure variety
     templates = [
         "{base}", "best {base}", "top {base}", "new {base}", "{base} app",
         "{base} free", "{base} pro", "{base} lite", "{base} 2025", "popular {base}",
@@ -181,29 +181,93 @@ def fallback_keywords(base):
         "apps like {base}", "similar to {base}", "{base} alternative",
         "best {base} apps", "top rated {base}", "{base} version",
         "{base} online", "{base} offline", "{base} premium", "{base} paid",
-        "{base} cheap", "{base} expensive", "{base} rating", "{base} store",
-        "{base} guide", "{base} tutorial", "{base} help", "{base} support",
-        "{base} community", "{base} forum", "{base} discussion"
+        "{base} rating", "{base} store", "{base} guide", "{base} tutorial",
+        "{base} help", "{base} support", "{base} community", "{base} forum",
+        "top 10 {base}", "best {base} 2025", "new {base} apps", "trending {base}",
+        "{base} for beginners", "{base} expert", "{base} pro version",
+        "{base} tips", "{base} tricks", "{base} hacks", "{base} secrets",
+        "{base} features", "{base} comparison", "{base} vs", "{base} alternatives",
+        "{base} review", "{base} ratings", "{base} score", "{base} installs",
+        "{base} users", "{base} feedback", "{base} suggestions",
+        "{base} issues", "{base} bugs", "{base} crash", "{base} fix",
+        "{base} solution", "{base} workaround", "{base} update",
+        "{base} news", "{base} blog", "{base} official", "{base} website",
+        "{base} login", "{base} signup", "{base} account", "{base} profile",
+        "{base} settings", "{base} preferences", "{base} options",
+        "{base} dark mode", "{base} light mode", "{base} theme",
+        "{base} widget", "{base} shortcut", "{base} launcher",
+        "{base} icon pack", "{base} wallpaper", "{base} background",
+        "{base} notification", "{base} sound", "{base} ringtone",
+        "{base} alarm", "{base} timer", "{base} stopwatch",
+        "{base} calculator", "{base} converter", "{base} translator",
+        "{base} dictionary", "{base} thesaurus", "{base} encyclopedia",
+        "{base} game", "{base} quiz", "{base} puzzle", "{base} challenge",
+        "{base} multiplayer", "{base} single player", "{base} offline game",
+        "{base} online game", "{base} strategy", "{base} action",
+        "{base} adventure", "{base} role playing", "{base} simulation",
+        "{base} sports", "{base} racing", "{base} fighting",
+        "{base} card game", "{base} board game", "{base} word game",
+        "{base} trivia", "{base} knowledge", "{base} education",
+        "{base} learning", "{base} course", "{base} training",
+        "{base} certification", "{base} exam", "{base} test",
+        "{base} practice", "{base} quiz", "{base} flashcard",
+        "{base} language", "{base} english", "{base} spanish",
+        "{base} french", "{base} german", "{base} italian",
+        "{base} japanese", "{base} chinese", "{base} korean",
+        "{base} russian", "{base} arabic", "{base} hindi",
+        "{base} bengali", "{base} urdu", "{base} punjabi",
+        "{base} tamil", "{base} telugu", "{base} marathi",
+        "{base} gujarati", "{base} kannada", "{base} malayalam",
+        "{base} odia", "{base} assamese", "{base} nepali",
+        "{base} sinhala", "{base} thai", "{base} vietnamese",
+        "{base} indonesian", "{base} malay", "{base} tagalog",
+        "{base} swahili", "{base} zulu", "{base} xhosa",
+        "{base} afrikaans", "{base} dutch", "{base} swedish",
+        "{base} norwegian", "{base} danish", "{base} finnish",
+        "{base} polish", "{base} czech", "{base} slovak",
+        "{base} hungarian", "{base} romanian", "{base} bulgarian",
+        "{base} serbian", "{base} croatian", "{base} bosnian",
+        "{base} albanian", "{base} greek", "{base} turkish",
+        "{base} hebrew", "{base} yiddish", "{base} persian",
+        "{base} pashto", "{base} kurdish", "{base} uzbek",
+        "{base} kazakh", "{base} turkmen", "{base} kyrgyz",
+        "{base} tajik", "{base} mongolian", "{base} tibetan",
+        "{base} uyghur", "{base} burmese", "{base} lao",
+        "{base} khmer", "{base} hmong", "{base} filipino",
+        "{base} cebuano", "{base} ilocano", "{base} hiligaynon",
+        "{base} waray", "{base} bikol", "{base} kapampangan",
+        "{base} pangasinan", "{base} maranao", "{base} maguindanao",
+        "{base} tausug", "{base} yakan", "{base} sama",
+        "{base} badjao", "{base} molbog", "{base} palawani",
+        "{base} tagbanwa", "{base} batak", "{base} caluyanon",
+        "{base} cagayanen", "{base} agutaynen", "{base} aborlan",
+        "{base} tagalog", "{base} ilokano", "{base} bikol",
+        "{base} hiligaynon", "{base} waray-waray", "{base} kapampangan",
+        "{base} pangasinan", "{base} maranao", "{base} maguindanao",
+        "{base} tausug", "{base} yakan", "{base} sama",
+        "{base} badjao", "{base} molbog", "{base} palawani",
+        "{base} tagbanwa", "{base} batak", "{base} caluyanon",
+        "{base} cagayanen", "{base} agutaynen", "{base} aborlan"
     ]
     result = []
-    for i in range(1, 201):
+    i = 0
+    while len(result) < 200:
         tmpl = templates[i % len(templates)]
         word = tmpl.format(base=base)
-        if i % 3 == 0:
-            word = f"{word} {i}"
-        elif i % 5 == 0:
+        # Add variety with numbers
+        if i % 5 == 0:
+            word = f"{word} {i+1}"
+        elif i % 7 == 0:
             word = f"best {word}"
-        result.append(word)
-    seen = set()
-    unique = []
-    for w in result:
-        if w not in seen:
-            seen.add(w)
-            unique.append(w)
-    return unique[:200]
+        elif i % 11 == 0:
+            word = f"top {word}"
+        if word not in result:
+            result.append(word)
+        i += 1
+    return result[:200]
 
 def generate_keywords_from_base(base):
-    """Use Groq with the keyword prompt from settings to generate 200 related search terms."""
+    """Use Groq with the keyword prompt from settings. Fallback if fails."""
     settings = get_settings()
     kw_prompt = settings.get('keyword_prompt', 'Generate Play Store search terms for')
     send(f"🧠 Generating 200 keywords from '{base}' using prompt: {kw_prompt[:50]}...")
@@ -224,6 +288,7 @@ Comma separated list only. No numbers, no bullets, no explanations."""
             if 2 < len(t) < 60 and t not in terms:
                 terms.append(t)
         if len(terms) < 10:
+            send("⚠️ AI returned too few keywords. Using fallback.")
             terms = fallback_keywords(base)
         else:
             terms = terms[:200]
@@ -236,7 +301,7 @@ Comma separated list only. No numbers, no bullets, no explanations."""
         return fallback
 
 # ════════════════════════════════════════════════════════════
-#  FILTER A SINGLE APP (returns True if qualified)
+#  FILTER A SINGLE APP
 # ════════════════════════════════════════════════════════════
 def is_qualified(app_dict, max_rating, max_installs, seen_emails):
     dev = str(app_dict.get('dev_name','') or '').lower()
@@ -259,7 +324,7 @@ def is_qualified(app_dict, max_rating, max_installs, seen_emails):
     return True, "passed"
 
 # ════════════════════════════════════════════════════════════
-#  SAVE A SINGLE QUALIFIED LEAD TO SHEET
+#  SAVE A SINGLE QUALIFIED LEAD
 # ════════════════════════════════════════════════════════════
 def save_qualified_lead(row):
     try:
@@ -272,7 +337,7 @@ def save_qualified_lead(row):
         return False
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE (with per-keyword filtering, deep search)
+#  PHASE 1 — SCRAPE (optimized for speed & yield)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -324,7 +389,7 @@ def phase1_scrape():
              f"Already qualified emails: *{len(state['seen_emails'])}*\n"
              f"Starting scrape with {len(generated)} keywords.")
 
-        # DEEP SEARCH: 30+ variations per keyword, n_hits=500, longer delays
+        # Extensive search variations (40+) to maximize yield
         search_variations = [
             "{kw}", "best {kw}", "top {kw}", "new {kw}", "{kw} app",
             "{kw} free", "{kw} pro", "{kw} lite", "{kw} 2025", "popular {kw}",
@@ -336,7 +401,10 @@ def phase1_scrape():
             "{kw} rating", "{kw} store", "{kw} guide", "{kw} tutorial",
             "{kw} help", "{kw} support", "{kw} community", "{kw} forum",
             "top 10 {kw}", "best {kw} 2025", "new {kw} apps", "trending {kw}",
-            "{kw} for beginners", "{kw} expert", "{kw} pro version"
+            "{kw} for beginners", "{kw} expert", "{kw} pro version",
+            "{kw} tips", "{kw} tricks", "{kw} hacks", "{kw} secrets",
+            "{kw} features", "{kw} comparison", "{kw} vs", "{kw} alternatives",
+            "{kw} review", "{kw} ratings", "{kw} score", "{kw} installs"
         ]
 
         while state["kw_index"] < len(state["generated_kws"]):
@@ -353,8 +421,8 @@ def phase1_scrape():
                 try:
                     results = search(q, lang='en', country='us', n_hits=500)
                     for r in results: raw_ids.append(r['appId'])
-                    # Longer random delay 3-7 seconds to avoid rate limits
-                    time.sleep(random.uniform(3, 7))
+                    # Reduced delay: 1-3 seconds
+                    time.sleep(random.uniform(1, 3))
                 except Exception as e:
                     print(f"Search error for '{q}': {e}")
                     continue
@@ -436,8 +504,8 @@ def phase1_scrape():
                     except Exception as e:
                         print(f"Batch save error: {e}")
 
-                # Longer delay between app details: 0.5-1.5 seconds
-                time.sleep(random.uniform(0.5, 1.5))
+                # Reduced delay: 0.2-0.5 seconds
+                time.sleep(random.uniform(0.2, 0.5))
 
             if batch_raw:
                 try:
@@ -477,7 +545,7 @@ def phase1_scrape():
         bot.send_message(cid, ".", reply_markup=kb())
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 2 — EMAIL ONLY (with automatic sender switching)
+#  PHASE 2 — EMAIL (automatic sender switching)
 # ════════════════════════════════════════════════════════════
 def phase2_email_only():
     cid = state["chat_id"]
@@ -586,7 +654,7 @@ def get_pending_qualified_leads():
         pass
     return []
 
-# ─── CLEAN EMAIL BUILDER (uses email prompt from settings) ───
+# ─── CLEAN EMAIL BUILDER (uses email prompt) ─────────────────
 def build_clean_email(row, sender_email, email_prompt):
     app_name    = str(row.get('app_name','Unknown App'))
     dev_name    = str(row.get('dev_name','') or '').strip()
@@ -698,7 +766,7 @@ Telegram: https://t.me/abu_raihan69"""
         full_html = f"<div>{fallback}{unsubscribe}</div>"
         return subject, full_html
 
-# ─── SPAM TEST — with sender selection ───────────────────────
+# ─── SPAM TEST with sender selection ────────────────────────
 def run_spam_test_with_sender(test_email, sender):
     settings = get_settings()
     email_prompt = settings.get('email_prompt', 'Write a professional outreach email.')
@@ -786,7 +854,7 @@ def refresh_status():
 def welcome(message):
     state["chat_id"] = message.chat.id
     state["status"]  = "IDLE"
-    state["settings"] = {}  # reset cache on new session
+    state["settings"] = {}
     bot.reply_to(message,
         "👋 *Welcome Boss!*\n\n"
         "*🚀 Start Automation:* Runs full workflow – scrape + filter + email – using next pending keyword set.\n"
