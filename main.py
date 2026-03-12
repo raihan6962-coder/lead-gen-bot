@@ -49,9 +49,9 @@ def kb():
         m.add(KeyboardButton("📅 Schedules"),        KeyboardButton("🔑 Keywords"))
         m.add(KeyboardButton("🧪 Spam Test"),        KeyboardButton("📧 Senders"))
     elif s in ["SCRAPING", "FILTERING", "EMAILING"]:
-        m.add(KeyboardButton("🛑 Pause"))
+        m.add(KeyboardButton("🛑 Pause"),  KeyboardButton("⏹️ Stop"))
     elif s == "PAUSED":
-        m.add(KeyboardButton("▶️ Resume"),  KeyboardButton("⏹️ Reset"))
+        m.add(KeyboardButton("▶️ Resume"),  KeyboardButton("⏹️ Stop"),  KeyboardButton("⏹️ Reset"))
     return m
 
 def back_kb():
@@ -177,7 +177,8 @@ def phase1_scrape():
 
         while state["kw_index"] < len(state["keywords"]):
             while state["status"] == "PAUSED": time.sleep(1)
-            if state["status"] == "IDLE": break
+            if state["status"] == "IDLE":  # Stop pressed
+                return
 
             kw = state["keywords"][state["kw_index"]]
             send(f"🔍 *KW {state['kw_index']+1}/{len(state['keywords'])}:* `{kw}`")
@@ -258,7 +259,7 @@ def phase1_scrape():
                     except Exception as e:
                         print(f"Batch save error: {e}")
 
-                time.sleep(0.1)
+                time.sleep(0.05)  # slightly faster
 
             if batch:
                 try:
@@ -272,6 +273,7 @@ def phase1_scrape():
 
             state["kw_index"] += 1
 
+        # Phase 1 complete – mark set as used only if not stopped
         if state["status"] != "IDLE" and state["current_set_id"]:
             mark_keyword_set_used(state["current_set_id"])
             state["current_set_id"] = None
@@ -293,7 +295,7 @@ def phase1_scrape():
         bot.send_message(cid, ".", reply_markup=kb())
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 2 — FILTER & EMAIL (with improved email builder)
+#  PHASE 2 — FILTER & EMAIL (with improved filter)
 # ════════════════════════════════════════════════════════════
 def phase2_filter_and_email():
     cid = state["chat_id"]
@@ -307,7 +309,7 @@ def phase2_filter_and_email():
         email_prompt = str(res.get('email_prompt','Write a professional outreach email.'))
 
         send(f"📊 *Phase 2 Starting*\n"
-             f"Filter: Rating ≤ `{max_rating}` | Installs ≤ `{max_installs:,}`\n"
+             f"Filter: Rating ≤ `{max_rating}` (and > 0) | Installs ≤ `{max_installs:,}`\n"
              f"Loading raw data from sheet...")
 
         raw_data = requests.post(SHEET_URL,
@@ -333,7 +335,7 @@ def phase2_filter_and_email():
         except:
             seen_emails = set()
 
-        stats = {"gov":0, "rating":0, "installs":0, "no_email":0, "dup":0, "passed":0}
+        stats = {"gov":0, "rating":0, "installs":0, "no_email":0, "dup":0, "zero_rating":0, "passed":0}
 
         for row in raw_data:
             while state["status"] == "PAUSED": time.sleep(1)
@@ -344,22 +346,32 @@ def phase2_filter_and_email():
             installs = int(row.get('installs') or 0)
             email    = str(row.get('email','') or '').strip().lower()
 
+            # Skip government
             if any(g in dev for g in GOV):
                 stats["gov"] += 1
                 continue
 
+            # Skip zero rating (no reviews)
+            if rating == 0.0:
+                stats["zero_rating"] += 1
+                continue
+
+            # Rating filter
             if rating > max_rating:
                 stats["rating"] += 1
                 continue
 
+            # Install filter
             if installs > max_installs:
                 stats["installs"] += 1
                 continue
 
+            # Email check
             if not email or '@' not in email:
                 stats["no_email"] += 1
                 continue
 
+            # Duplicate check
             if email in seen_emails:
                 stats["dup"] += 1
                 continue
@@ -370,6 +382,7 @@ def phase2_filter_and_email():
 
         send(f"✅ *Filter Complete!*\n"
              f"Passed: *{stats['passed']}*\n"
+             f"Zero rating (skipped): {stats['zero_rating']}\n"
              f"Rating fail: {stats['rating']} | Install fail: {stats['installs']}\n"
              f"No email: {stats['no_email']} | Duplicate: {stats['dup']} | Gov: {stats['gov']}\n\n"
              f"Saving qualified leads & starting emails...")
@@ -395,7 +408,7 @@ def phase2_filter_and_email():
 
         for row in qualified:
             while state["status"] == "PAUSED": time.sleep(1)
-            if state["status"] == "IDLE" or state["total_emailed"] >= 200: break
+            if state["status"] == "IDLE": break
 
             try:
                 senders   = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
@@ -629,9 +642,9 @@ def run_scheduler():
                 if now in times:
                     send(f"⏰ Scheduled time *{now}* – starting full automation...")
                     threading.Thread(target=phase1_scrape, daemon=True).start()
-                    time.sleep(61)
+                    time.sleep(61)  # avoid re-triggering in same minute
         except Exception as e:
-            print(f"Scheduler: {e}")
+            print(f"Scheduler error: {e}")
         time.sleep(10)
 
 # ─── BOT HANDLERS ────────────────────────────────────────────
@@ -808,11 +821,22 @@ def handle(message):
 
     elif text == "▶️ Resume":
         if state["status"] == "PAUSED":
+            # Resume to the appropriate phase
             if state["keywords"] and state["kw_index"] < len(state["keywords"]):
                 state["status"] = "SCRAPING"
             else:
                 state["status"] = "EMAILING"
             bot.reply_to(message,"▶️ *Resuming...*",
+                parse_mode="Markdown", reply_markup=kb())
+
+    elif text == "⏹️ Stop":
+        if state["status"] in ["SCRAPING","FILTERING","EMAILING","PAUSED"]:
+            # Abort current run, clear local state but keep keyword set pending
+            state["status"] = "IDLE"
+            state["keywords"] = []
+            state["kw_index"] = 0
+            state["current_set_id"] = None
+            bot.reply_to(message,"⏹️ *Stopped.* Current keyword set remains pending.",
                 parse_mode="Markdown", reply_markup=kb())
 
     elif text == "⏹️ Reset":
