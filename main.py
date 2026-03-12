@@ -26,8 +26,8 @@ ai  = Groq(api_key=GROQ_KEY)
 # ─── STATE ───────────────────────────────────────────────────
 state = {
     "status":         "IDLE",   # IDLE / SCRAPING / FILTERING / EMAILING / PAUSED
-    "keywords":       [],       # current keyword set (list of terms)
-    "kw_index":       0,
+    "generated_kws":  [],       # list of generated keywords for current base set
+    "kw_index":       0,        # index in generated_kws
     "scraped_ids":    set(),    # globally seen appIds
     "total_scraped":  0,
     "total_emailed":  0,
@@ -145,14 +145,48 @@ def delete_schedule_time(time_str):
         print(f"delete_schedule_time error: {e}")
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE
+#  AI KEYWORD GENERATION
+# ════════════════════════════════════════════════════════════
+def generate_keywords_from_base(base):
+    """Use Groq to generate 200 related search terms from a base keyword."""
+    send(f"🧠 Generating 200 keywords from '{base}'...")
+    prompt = f"""Generate 200 unique, short search terms (2-5 words each) related to "{base}" that people might type into Google Play Store.
+Return them as a comma-separated list. No numbers, no bullets, no explanations. Just the terms."""
+    try:
+        r = ai.chat.completions.create(
+            messages=[{"role":"user","content":prompt}],
+            model="llama-3.1-8b-instant",
+            max_tokens=2000
+        )
+        raw = r.choices[0].message.content.replace('\n',',').replace('\r',',')
+        # Clean and split
+        terms = []
+        for t in raw.split(','):
+            t = re.sub(r'^\d+[\.\)\-\s]+','', t)
+            t = t.replace('**','').replace('*','').replace('#','').strip()
+            if 2 < len(t) < 60 and t not in terms:
+                terms.append(t)
+        if len(terms) < 10:
+            # Fallback if AI fails
+            terms = [base, f"best {base}", f"top {base}", f"new {base}", f"{base} app",
+                     f"{base} free", f"{base} pro", f"{base} lite", f"{base} 2025",
+                     f"popular {base}"]
+        send(f"✅ Generated {len(terms)} keywords.")
+        return terms
+    except Exception as e:
+        send(f"❌ Keyword generation failed: {e}")
+        # Fallback to just the base
+        return [base]
+
+# ════════════════════════════════════════════════════════════
+#  PHASE 1 — SCRAPE (with AI keyword generation)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
     state["status"] = "SCRAPING"
 
     try:
-        set_id, kw_set = get_next_keyword_set()
+        set_id, base_kw = get_next_keyword_set()
         if not set_id:
             send("❌ No pending keyword sets. Add some first.")
             state["status"] = "IDLE"
@@ -160,12 +194,19 @@ def phase1_scrape():
             return
 
         state["current_set_id"] = set_id
-        state["keywords"] = [kw_set]
+
+        # Generate 200 keywords from the base
+        generated = generate_keywords_from_base(base_kw)
+        if not generated:
+            send("❌ No keywords generated. Aborting.")
+            state["status"] = "IDLE"
+            return
+
+        state["generated_kws"] = generated
         state["kw_index"] = 0
         state["total_scraped"] = 0
 
-        send(f"🔍 Using keyword set: *{kw_set}*")
-
+        # Load already scraped IDs
         try:
             existing = requests.post(SHEET_URL, json={"action":"get_scraped_ids"}, timeout=20).json()
             state["scraped_ids"] = set(existing) if isinstance(existing, list) else set()
@@ -175,14 +216,16 @@ def phase1_scrape():
         send(f"✅ Already in DB: *{len(state['scraped_ids'])}* apps\n"
              f"Will skip these and only scrape new ones.")
 
-        while state["kw_index"] < len(state["keywords"]):
+        # Iterate over generated keywords
+        while state["kw_index"] < len(state["generated_kws"]):
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE":  # Stop pressed
                 return
 
-            kw = state["keywords"][state["kw_index"]]
-            send(f"🔍 *KW {state['kw_index']+1}/{len(state['keywords'])}:* `{kw}`")
+            kw = state["generated_kws"][state["kw_index"]]
+            send(f"🔍 *KW {state['kw_index']+1}/{len(state['generated_kws'])}:* `{kw}`")
 
+            # Search 8 variations
             raw_ids = []
             for q in [kw, f"{kw} app", f"{kw} free", f"best {kw}",
                       f"new {kw}", f"{kw} simple", f"{kw} lite", f"{kw} basic"]:
@@ -192,6 +235,7 @@ def phase1_scrape():
                     time.sleep(0.2)
                 except: continue
 
+            # Deduplicate
             seen_kw, ids = set(), []
             for i in raw_ids:
                 if i not in seen_kw and i not in state["scraped_ids"]:
@@ -295,7 +339,7 @@ def phase1_scrape():
         bot.send_message(cid, ".", reply_markup=kb())
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 2 — FILTER & EMAIL (with improved filter)
+#  PHASE 2 — FILTER & EMAIL (unchanged but with zero-rating skip)
 # ════════════════════════════════════════════════════════════
 def phase2_filter_and_email():
     cid = state["chat_id"]
@@ -822,7 +866,7 @@ def handle(message):
     elif text == "▶️ Resume":
         if state["status"] == "PAUSED":
             # Resume to the appropriate phase
-            if state["keywords"] and state["kw_index"] < len(state["keywords"]):
+            if state["generated_kws"] and state["kw_index"] < len(state["generated_kws"]):
                 state["status"] = "SCRAPING"
             else:
                 state["status"] = "EMAILING"
@@ -833,7 +877,7 @@ def handle(message):
         if state["status"] in ["SCRAPING","FILTERING","EMAILING","PAUSED"]:
             # Abort current run, clear local state but keep keyword set pending
             state["status"] = "IDLE"
-            state["keywords"] = []
+            state["generated_kws"] = []
             state["kw_index"] = 0
             state["current_set_id"] = None
             bot.reply_to(message,"⏹️ *Stopped.* Current keyword set remains pending.",
@@ -841,8 +885,12 @@ def handle(message):
 
     elif text == "⏹️ Reset":
         state.update({
-            "status":"IDLE","keywords":[],"kw_index":0,
-            "scraped_ids":set(),"total_scraped":0,"total_emailed":0,
+            "status":"IDLE",
+            "generated_kws":[],
+            "kw_index":0,
+            "scraped_ids":set(),
+            "total_scraped":0,
+            "total_emailed":0,
             "current_set_id": None
         })
         bot.reply_to(message,"⏹️ *Fully reset.*", parse_mode="Markdown", reply_markup=kb())
