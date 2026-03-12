@@ -424,43 +424,7 @@ def phase2_email_only():
     cid = state["chat_id"]
 
     try:
-        # Load settings (for contact info, prompt – not used but kept)
-        res = requests.post(SHEET_URL, json={"action":"get_settings"}, timeout=20).json()
-        # We'll use the existing qualified leads sheet
-
-        send("📧 *Starting email phase...* Loading qualified leads from sheet.")
-
-        # Get all qualified leads that are still "Pending"
-        # For simplicity, we'll fetch all and filter locally, but sheet doesn't have status column? Actually we have "Status" column in Qualified Leads.
-        # We'll fetch all qualified leads from sheet, but only those with status "Pending" (or not "Sent").
-        # We'll implement a new action to get pending qualified leads. But to keep it simple, we'll use the existing get_qualified_emails but we need full rows.
-        # Let's add a new action in Apps Script: get_pending_qualified_leads.
-        # Since we cannot modify Apps Script now, we'll assume we have a sheet and we'll fetch all qualified leads and filter by status locally? But we don't have status in the row data from previous calls.
-        # Actually in save_qualified_batch we added a "Status" column with "Pending". So we need to fetch those rows.
-        # We'll create a new function in Apps Script later. For now, we'll use the existing get_raw_leads but that's raw leads. Hmm.
-
-        # To avoid complicating, we'll use the approach: we have saved qualified leads during phase1, and we have the state["qualified_count"] but we don't have the actual rows in memory.
-        # We need to fetch them from sheet. Let's add a new action in Apps Script: get_pending_qualified_leads.
-        # I'll include that in the final Apps Script update. For now, I'll write the code assuming that action exists.
-
-        # But the user might not update Apps Script immediately. To make it work without new action, we can fetch all qualified leads and filter by status in Python if we have the status column. But we don't have that data from previous calls.
-        # Alternative: during phase1, we could store the qualified leads in a list and pass to email phase. That's simpler and avoids extra sheet calls.
-        # We'll do that: keep a list of qualified leads in memory during phase1, and then email from that list.
-        # But if the bot restarts, we lose that list. However, the qualified leads are also saved in sheet, so we could reload.
-        # For reliability, we'll combine: during phase1 we build a list of qualified leads, and at the end we start emailing from that list.
-        # But if the bot is stopped and resumed, we need to reload. We'll keep it simple: email phase will fetch all pending qualified leads from sheet using a new action.
-        # I'll provide the updated Apps Script with that action.
-
-        # For now, in this code, we'll assume we have a function get_pending_qualified_leads() that returns list of rows.
-        # I'll implement it below using a new action.
-
-        # Since we cannot change the Apps Script here, I'll write the code to use a new action, and later provide the updated Apps Script.
-
-        # For the sake of this response, I'll include the new action in the Apps Script at the end.
-
-        # But the user asked for code update, so I'll provide both main.py and the updated Apps Script with the new action.
-
-        # In the email phase below, I'll call a function to fetch pending qualified leads.
+        send("📧 *Starting email phase...* Loading pending qualified leads from sheet.")
 
         pending = get_pending_qualified_leads()
         if not pending:
@@ -707,21 +671,27 @@ def run_spam_test(test_email):
         send(f"❌ Error: {e}")
         bot.send_message(state["chat_id"],".", reply_markup=kb())
 
-# ─── SCHEDULER ───────────────────────────────────────────────
+# ─── SCHEDULER (FIXED) ───────────────────────────────────────
 def run_scheduler():
     tz = pytz.timezone('Asia/Dhaka')
+    send("⏰ Scheduler started. Will check every 10 seconds.")
     while True:
         try:
             if state["status"] == "IDLE":
                 now = datetime.now(tz).strftime("%H:%M")
                 times = get_schedule_times()
-                if now in times:
-                    send(f"⏰ Scheduled time *{now}* – starting full automation...")
-                    threading.Thread(target=phase1_scrape, daemon=True).start()
-                    time.sleep(61)
+                if times:
+                    # Debug: send current time and scheduled times (optional, can be removed later)
+                    # send(f"🕒 Current time: {now}, Schedules: {times}")
+                    if now in times:
+                        send(f"⏰ Scheduled time *{now}* detected – starting full automation...")
+                        threading.Thread(target=phase1_scrape, daemon=True).start()
+                        # Wait 61 seconds to avoid re-triggering in same minute
+                        time.sleep(61)
+            time.sleep(10)
         except Exception as e:
-            print(f"Scheduler error: {e}")
-        time.sleep(10)
+            send(f"❌ Scheduler error: {e}")
+            time.sleep(10)
 
 # ─── BOT HANDLERS ────────────────────────────────────────────
 @bot.message_handler(commands=['start'])
