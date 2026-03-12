@@ -168,11 +168,10 @@ def delete_schedule_time(time_str):
         print(f"delete_schedule_time error: {e}")
 
 # ════════════════════════════════════════════════════════════
-#  AI KEYWORD GENERATION with IMPROVED FALLBACK (200 keywords)
+#  AI KEYWORD GENERATION with CLEAN FALLBACK
 # ════════════════════════════════════════════════════════════
 def fallback_keywords(base):
-    """Generate exactly 200 unique keywords using templates when Groq fails."""
-    # Extensive list of templates to ensure variety
+    """Generate exactly 200 unique, realistic search keywords without random numbers."""
     templates = [
         "{base}", "best {base}", "top {base}", "new {base}", "{base} app",
         "{base} free", "{base} pro", "{base} lite", "{base} 2025", "popular {base}",
@@ -190,7 +189,7 @@ def fallback_keywords(base):
         "{base} review", "{base} ratings", "{base} score", "{base} installs",
         "{base} users", "{base} feedback", "{base} suggestions",
         "{base} issues", "{base} bugs", "{base} crash", "{base} fix",
-        "{base} solution", "{base} workaround", "{base} update",
+        "{base} solution", "{base} workaround",
         "{base} news", "{base} blog", "{base} official", "{base} website",
         "{base} login", "{base} signup", "{base} account", "{base} profile",
         "{base} settings", "{base} preferences", "{base} options",
@@ -210,59 +209,43 @@ def fallback_keywords(base):
         "{base} trivia", "{base} knowledge", "{base} education",
         "{base} learning", "{base} course", "{base} training",
         "{base} certification", "{base} exam", "{base} test",
-        "{base} practice", "{base} quiz", "{base} flashcard",
-        "{base} language", "{base} english", "{base} spanish",
-        "{base} french", "{base} german", "{base} italian",
-        "{base} japanese", "{base} chinese", "{base} korean",
-        "{base} russian", "{base} arabic", "{base} hindi",
-        "{base} bengali", "{base} urdu", "{base} punjabi",
-        "{base} tamil", "{base} telugu", "{base} marathi",
-        "{base} gujarati", "{base} kannada", "{base} malayalam",
-        "{base} odia", "{base} assamese", "{base} nepali",
-        "{base} sinhala", "{base} thai", "{base} vietnamese",
-        "{base} indonesian", "{base} malay", "{base} tagalog",
-        "{base} swahili", "{base} zulu", "{base} xhosa",
-        "{base} afrikaans", "{base} dutch", "{base} swedish",
-        "{base} norwegian", "{base} danish", "{base} finnish",
-        "{base} polish", "{base} czech", "{base} slovak",
-        "{base} hungarian", "{base} romanian", "{base} bulgarian",
-        "{base} serbian", "{base} croatian", "{base} bosnian",
-        "{base} albanian", "{base} greek", "{base} turkish",
-        "{base} hebrew", "{base} yiddish", "{base} persian",
-        "{base} pashto", "{base} kurdish", "{base} uzbek",
-        "{base} kazakh", "{base} turkmen", "{base} kyrgyz",
-        "{base} tajik", "{base} mongolian", "{base} tibetan",
-        "{base} uyghur", "{base} burmese", "{base} lao",
-        "{base} khmer", "{base} hmong", "{base} filipino",
-        "{base} cebuano", "{base} ilocano", "{base} hiligaynon",
-        "{base} waray", "{base} bikol", "{base} kapampangan",
-        "{base} pangasinan", "{base} maranao", "{base} maguindanao",
-        "{base} tausug", "{base} yakan", "{base} sama",
-        "{base} badjao", "{base} molbog", "{base} palawani",
-        "{base} tagbanwa", "{base} batak", "{base} caluyanon",
-        "{base} cagayanen", "{base} agutaynen", "{base} aborlan",
-        "{base} tagalog", "{base} ilokano", "{base} bikol",
-        "{base} hiligaynon", "{base} waray-waray", "{base} kapampangan",
-        "{base} pangasinan", "{base} maranao", "{base} maguindanao",
-        "{base} tausug", "{base} yakan", "{base} sama",
-        "{base} badjao", "{base} molbog", "{base} palawani",
-        "{base} tagbanwa", "{base} batak", "{base} caluyanon",
-        "{base} cagayanen", "{base} agutaynen", "{base} aborlan"
+        "{base} practice", "{base} flashcard",
+        "free {base}", "paid {base}", "cheap {base}", "expensive {base}",
+        "simple {base}", "easy {base}", "advanced {base}", "powerful {base}",
+        "fast {base}", "secure {base}", "reliable {base}", "trusted {base}",
+        "official {base}", "original {base}", "genuine {base}",
+        "{base} by google", "{base} by microsoft", "{base} by amazon",
+        "google {base}", "microsoft {base}", "amazon {base}",
+        "{base} for business", "{base} for personal", "{base} for work",
+        "{base} for study", "{base} for kids", "{base} for adults",
+        "{base} with ads", "{base} no ads", "{base} ad free",
+        "{base} in english", "{base} in spanish", "{base} in hindi",
+        "{base} 2024", "{base} 2023", "{base} old version",
+        "{base} previous version", "{base} classic", "{base} retro",
+        "get {base}", "install {base}", "use {base}", "try {base}",
+        "{base} demo", "{base} trial", "{base} sample", "{base} preview",
+        "{base} beta", "{base} alpha", "{base} stable",
+        "{base} community edition", "{base} professional",
+        "{base} ultimate", "{base} premium", "{base} gold",
+        "{base} plus", "{base} extra", "{base} max",
+        "{base} mini", "{base} micro", "{base} nano",
+        "smart {base}", "intelligent {base}", "ai {base}", "artificial intelligence {base}",
+        "machine learning {base}", "deep learning {base}", "neural {base}",
+        "blockchain {base}", "crypto {base}", "bitcoin {base}",
+        "cloud {base}", "web {base}", "mobile {base}",
+        "desktop {base}", "pc {base}", "mac {base}", "linux {base}",
+        "windows {base}", "ios {base}", "android {base}"
     ]
     result = []
+    seen = set()
     i = 0
     while len(result) < 200:
         tmpl = templates[i % len(templates)]
-        word = tmpl.format(base=base)
-        # Add variety with numbers
-        if i % 5 == 0:
-            word = f"{word} {i+1}"
-        elif i % 7 == 0:
-            word = f"best {word}"
-        elif i % 11 == 0:
-            word = f"top {word}"
-        if word not in result:
-            result.append(word)
+        keyword = tmpl.format(base=base)
+        keyword = re.sub(r'\s+', ' ', keyword).strip()
+        if 2 < len(keyword) < 60 and keyword not in seen:
+            seen.add(keyword)
+            result.append(keyword)
         i += 1
     return result[:200]
 
@@ -337,7 +320,7 @@ def save_qualified_lead(row):
         return False
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE (optimized for speed & yield)
+#  PHASE 1 — SCRAPE (simplified for speed and yield)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -389,22 +372,12 @@ def phase1_scrape():
              f"Already qualified emails: *{len(state['seen_emails'])}*\n"
              f"Starting scrape with {len(generated)} keywords.")
 
-        # Extensive search variations (40+) to maximize yield
+        # SIMPLIFIED search variations – just 4 high‑value ones to get 150‑200 apps per keyword
         search_variations = [
-            "{kw}", "best {kw}", "top {kw}", "new {kw}", "{kw} app",
-            "{kw} free", "{kw} pro", "{kw} lite", "{kw} 2025", "popular {kw}",
-            "{kw} for android", "{kw} download", "{kw} latest", "{kw} update",
-            "{kw} reviews", "{kw} problems", "{kw} complaints",
-            "apps like {kw}", "similar to {kw}", "{kw} alternative",
-            "best {kw} apps", "top rated {kw}", "{kw} version",
-            "{kw} online", "{kw} offline", "{kw} premium", "{kw} paid",
-            "{kw} rating", "{kw} store", "{kw} guide", "{kw} tutorial",
-            "{kw} help", "{kw} support", "{kw} community", "{kw} forum",
-            "top 10 {kw}", "best {kw} 2025", "new {kw} apps", "trending {kw}",
-            "{kw} for beginners", "{kw} expert", "{kw} pro version",
-            "{kw} tips", "{kw} tricks", "{kw} hacks", "{kw} secrets",
-            "{kw} features", "{kw} comparison", "{kw} vs", "{kw} alternatives",
-            "{kw} review", "{kw} ratings", "{kw} score", "{kw} installs"
+            "{kw}",
+            "best {kw}",
+            "top {kw}",
+            "new {kw}"
         ]
 
         while state["kw_index"] < len(state["generated_kws"]):
@@ -419,10 +392,11 @@ def phase1_scrape():
             for q_template in search_variations:
                 q = q_template.format(kw=kw)
                 try:
+                    # Use n_hits=500 to get maximum results
                     results = search(q, lang='en', country='us', n_hits=500)
                     for r in results: raw_ids.append(r['appId'])
-                    # Reduced delay: 1-3 seconds
-                    time.sleep(random.uniform(1, 3))
+                    # Minimal delay: 0.5-1 second
+                    time.sleep(random.uniform(0.5, 1.0))
                 except Exception as e:
                     print(f"Search error for '{q}': {e}")
                     continue
@@ -504,8 +478,8 @@ def phase1_scrape():
                     except Exception as e:
                         print(f"Batch save error: {e}")
 
-                # Reduced delay: 0.2-0.5 seconds
-                time.sleep(random.uniform(0.2, 0.5))
+                # Fast delay: 0.1-0.3 seconds
+                time.sleep(random.uniform(0.1, 0.3))
 
             if batch_raw:
                 try:
