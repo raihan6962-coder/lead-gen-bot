@@ -25,18 +25,18 @@ ai  = Groq(api_key=GROQ_KEY)
 
 # ─── STATE ───────────────────────────────────────────────────
 state = {
-    "status":         "IDLE",   # IDLE / SCRAPING / FILTERING / EMAILING / PAUSED
-    "generated_kws":  [],       # list of generated keywords for current base set
-    "kw_index":       0,        # index in generated_kws
-    "scraped_ids":    set(),    # globally seen appIds
+    "status":         "IDLE",
+    "generated_kws":  [],
+    "kw_index":       0,
+    "scraped_ids":    set(),
     "total_scraped":  0,
     "total_emailed":  0,
     "chat_id":        None,
     "tmp_url":        None,
     "tmp_email":      None,
-    "current_set_id": None,     # id of keyword set being processed
-    "qualified_count":0,        # counter for qualified leads collected so far
-    "seen_emails":    set(),    # emails already in qualified leads (to avoid duplicates)
+    "current_set_id": None,
+    "qualified_count":0,
+    "seen_emails":    set(),
 }
 
 GOV = ['gov','government','ministry','department','council',
@@ -129,13 +129,59 @@ def get_next_keyword_set():
 #  SCHEDULE MANAGEMENT (via sheet)
 # ════════════════════════════════════════════════════════════
 def get_schedule_times():
+    """
+    Fetch schedule times from Sheet and normalize everything to "HH:MM" strings.
+    Handles: plain "14:30", "14:30:00", Date objects serialized as strings, float fractions.
+    """
     try:
         r = requests.post(SHEET_URL, json={"action":"get_schedule_times"}, timeout=15)
-        if r.status_code == 200:
-            return r.json() if isinstance(r.json(), list) else []
+        if r.status_code != 200:
+            return []
+        raw = r.json()
+        if not isinstance(raw, list):
+            return []
+
+        cleaned = []
+        for item in raw:
+            t = str(item).strip()
+
+            # Case 1: "HH:MM" or "H:MM"
+            m = re.match(r'^(\d{1,2}):(\d{2})$', t)
+            if m:
+                cleaned.append(f"{int(m.group(1)):02d}:{m.group(2)}")
+                continue
+
+            # Case 2: "HH:MM:SS" — Apps Script sometimes serializes time this way
+            m = re.match(r'^(\d{1,2}):(\d{2}):\d{2}', t)
+            if m:
+                cleaned.append(f"{int(m.group(1)):02d}:{m.group(2)}")
+                continue
+
+            # Case 3: Full date-time string e.g. "Sat Dec 30 1899 14:30:00 GMT+0000"
+            m = re.search(r'(\d{1,2}):(\d{2}):\d{2}', t)
+            if m:
+                cleaned.append(f"{int(m.group(1)):02d}:{m.group(2)}")
+                continue
+
+            # Case 4: Float fraction of day (e.g. 0.6041666... = 14:30)
+            try:
+                fval = float(t)
+                if 0.0 <= fval < 1.0:
+                    total_min = round(fval * 24 * 60)
+                    h  = (total_min // 60) % 24
+                    mn = total_min % 60
+                    cleaned.append(f"{h:02d}:{mn:02d}")
+                    continue
+            except:
+                pass
+
+            print(f"[Scheduler] Could not parse time value: {repr(item)}")
+
+        return cleaned
+
     except Exception as e:
         print(f"get_schedule_times error: {e}")
-    return []
+        return []
 
 def add_schedule_time(time_str):
     try:
@@ -164,7 +210,6 @@ Return them as a comma-separated list. No numbers, no bullets, no explanations. 
             max_tokens=2000
         )
         raw = r.choices[0].message.content.replace('\n',',').replace('\r',',')
-        # Clean and split
         terms = []
         for t in raw.split(','):
             t = re.sub(r'^\d+[\.\)\-\s]+','', t)
@@ -172,7 +217,6 @@ Return them as a comma-separated list. No numbers, no bullets, no explanations. 
             if 2 < len(t) < 60 and t not in terms:
                 terms.append(t)
         if len(terms) < 10:
-            # Fallback if AI fails
             terms = [base, f"best {base}", f"top {base}", f"new {base}", f"{base} app",
                      f"{base} free", f"{base} pro", f"{base} lite", f"{base} 2025",
                      f"popular {base}"]
@@ -180,7 +224,6 @@ Return them as a comma-separated list. No numbers, no bullets, no explanations. 
         return terms
     except Exception as e:
         send(f"❌ Keyword generation failed: {e}")
-        # Fallback to just the base
         return [base]
 
 # ════════════════════════════════════════════════════════════
@@ -192,22 +235,16 @@ def is_qualified(app_dict, max_rating, max_installs, seen_emails):
     installs = int(app_dict.get('installs') or 0)
     email = str(app_dict.get('email','') or '').strip().lower()
 
-    # Government skip
     if any(g in dev for g in GOV):
         return False, "gov"
-    # Zero rating skip
     if rating == 0.0:
         return False, "zero_rating"
-    # Rating filter
     if rating > max_rating:
         return False, "rating"
-    # Install filter
     if installs > max_installs:
         return False, "installs"
-    # Email check
     if not email or '@' not in email:
         return False, "no_email"
-    # Duplicate check
     if email in seen_emails:
         return False, "dup"
     return True, "passed"
@@ -216,7 +253,6 @@ def is_qualified(app_dict, max_rating, max_installs, seen_emails):
 #  SAVE A SINGLE QUALIFIED LEAD TO SHEET
 # ════════════════════════════════════════════════════════════
 def save_qualified_lead(row):
-    """Save one qualified lead to the Qualified Leads sheet."""
     try:
         requests.post(SHEET_URL,
             json={"action":"save_qualified_batch","rows":[row]},
@@ -237,26 +273,22 @@ def phase1_scrape():
     state["status"] = "SCRAPING"
 
     try:
-        # Load filter settings
         res = requests.post(SHEET_URL, json={"action":"get_settings"}, timeout=20).json()
         max_installs = int(str(res.get('max_installs','100000')).replace(',','').strip())
         max_rating   = float(str(res.get('max_rating','4.5')).strip())
 
-        # Load already scraped IDs
         try:
             existing = requests.post(SHEET_URL, json={"action":"get_scraped_ids"}, timeout=20).json()
             state["scraped_ids"] = set(existing) if isinstance(existing, list) else set()
         except:
             state["scraped_ids"] = set()
 
-        # Load already qualified emails to avoid duplicates
         try:
             existing_emails = requests.post(SHEET_URL, json={"action":"get_qualified_emails"}, timeout=20).json()
             state["seen_emails"] = set(existing_emails) if isinstance(existing_emails, list) else set()
         except:
             state["seen_emails"] = set()
 
-        # Get next keyword set
         set_id, base_kw = get_next_keyword_set()
         if not set_id:
             send("❌ No pending keyword sets. Add some first.")
@@ -267,7 +299,6 @@ def phase1_scrape():
         state["current_set_id"] = set_id
         state["qualified_count"] = 0
 
-        # Generate 200 keywords from the base
         generated = generate_keywords_from_base(base_kw)
         if not generated:
             send("❌ No keywords generated. Aborting.")
@@ -282,16 +313,14 @@ def phase1_scrape():
              f"Already qualified emails: *{len(state['seen_emails'])}*\n"
              f"Starting scrape with {len(generated)} keywords.")
 
-        # Iterate over generated keywords
         while state["kw_index"] < len(state["generated_kws"]):
             while state["status"] == "PAUSED": time.sleep(1)
-            if state["status"] == "IDLE":  # Stop pressed
+            if state["status"] == "IDLE":
                 return
 
             kw = state["generated_kws"][state["kw_index"]]
             send(f"🔍 *KW {state['kw_index']+1}/{len(state['generated_kws'])}:* `{kw}`")
 
-            # Search 8 variations
             raw_ids = []
             for q in [kw, f"{kw} app", f"{kw} free", f"best {kw}",
                       f"new {kw}", f"{kw} simple", f"{kw} lite", f"{kw} basic"]:
@@ -301,7 +330,6 @@ def phase1_scrape():
                     time.sleep(0.2)
                 except: continue
 
-            # Deduplicate against global scraped_ids
             seen_kw, ids = set(), []
             for i in raw_ids:
                 if i not in seen_kw and i not in state["scraped_ids"]:
@@ -311,7 +339,7 @@ def phase1_scrape():
             send(f"📦 *{len(ids)}* new apps to fetch for `{kw}`")
 
             kw_count = 0
-            batch_raw = []  # raw batch to save (all apps, regardless of qualification)
+            batch_raw = []
             qualified_from_kw = 0
 
             for app_id in ids:
@@ -359,10 +387,8 @@ def phase1_scrape():
 
                 batch_raw.append(app_dict)
 
-                # Check qualification
                 qual, reason = is_qualified(app_dict, max_rating, max_installs, state["seen_emails"])
                 if qual:
-                    # Save to qualified leads immediately
                     if save_qualified_lead(app_dict):
                         state["seen_emails"].add(email)
                         state["qualified_count"] += 1
@@ -371,7 +397,6 @@ def phase1_scrape():
                 kw_count += 1
                 state["total_scraped"] += 1
 
-                # Save raw batch periodically
                 if len(batch_raw) >= 50:
                     try:
                         requests.post(SHEET_URL,
@@ -384,7 +409,6 @@ def phase1_scrape():
 
                 time.sleep(0.05)
 
-            # Save remaining raw apps
             if batch_raw:
                 try:
                     requests.post(SHEET_URL,
@@ -397,7 +421,6 @@ def phase1_scrape():
 
             state["kw_index"] += 1
 
-        # All keywords processed – mark set as used
         if state["status"] != "IDLE" and state["current_set_id"]:
             mark_keyword_set_used(state["current_set_id"])
             state["current_set_id"] = None
@@ -426,7 +449,6 @@ def phase1_scrape():
 #  PHASE 2 — EMAIL ONLY (sends to all qualified leads)
 # ════════════════════════════════════════════════════════════
 def phase2_email_only():
-    """Send emails to all qualified leads (already in sheet)."""
     cid = state["chat_id"]
     if not cid:
         print("Cannot start phase2: no chat_id")
@@ -450,7 +472,6 @@ def phase2_email_only():
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE": break
 
-            # Get available sender
             try:
                 senders   = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
                 available = [s for s in senders if int(s.get('sent',0)) < int(s.get('limit',1))]
@@ -516,7 +537,6 @@ def phase2_email_only():
         bot.send_message(cid, ".", reply_markup=kb())
 
 def get_pending_qualified_leads():
-    """Fetch all pending qualified leads from sheet."""
     try:
         r = requests.post(SHEET_URL, json={"action":"get_pending_qualified_leads"}, timeout=30)
         if r.status_code == 200:
@@ -525,11 +545,8 @@ def get_pending_qualified_leads():
         pass
     return []
 
-# ─── CLEAN EMAIL BUILDER (short, with unsubscribe) ──────────
+# ─── CLEAN EMAIL BUILDER ─────────────────────────────────────
 def build_clean_email(row, sender_email):
-    """
-    Generates a short, professional cold email with unsubscribe link at the bottom.
-    """
     app_name    = str(row.get('app_name','Unknown App'))
     dev_name    = str(row.get('dev_name','') or '').strip()
     if not dev_name or len(dev_name) < 2 or len(dev_name) > 35:
@@ -539,7 +556,6 @@ def build_clean_email(row, sender_email):
     website_url = str(row.get('website','') or '')
     description = str(row.get('description','') or '')[:300]
 
-    # Determine urgency
     if rating < 3.5:
         urgency = "critical"
     elif rating < 4.0:
@@ -547,7 +563,6 @@ def build_clean_email(row, sender_email):
     else:
         urgency = "noticing some recent reviews?"
 
-    # Business impact based on genre
     genre_lower = genre.lower()
     if any(word in genre_lower for word in ['finance','bank','payment','fintech']):
         impact = "hurts user trust and new sign-ups"
@@ -558,7 +573,6 @@ def build_clean_email(row, sender_email):
     else:
         impact = "affects downloads and retention"
 
-    # Try to fetch a genuine compliment
     compliment = ""
     if website_url and "http" in website_url:
         try:
@@ -569,7 +583,6 @@ def build_clean_email(row, sender_email):
             if match:
                 compliment = f"Congrats on {match.group(0)}!"
             else:
-                # use first sentence of description
                 sentences = description.split('.')
                 if sentences and len(sentences[0]) > 10:
                     compliment = f"I like your focus on {sentences[0].lower()[:50]}."
@@ -581,7 +594,6 @@ def build_clean_email(row, sender_email):
     if not compliment:
         compliment = f"Your app in the {genre} space looks interesting."
 
-    # Build a very concise prompt
     prompt = f"""Write a short cold email (max 120 words) to this developer:
 
 App: {app_name}
@@ -625,9 +637,7 @@ SUBJECT: ...
             subject = f"Quick question about {app_name}"
             body = content
 
-        # Convert to HTML with line breaks
         body_html = body.replace('\n\n','<br><br>').replace('\n','<br>')
-        # Add unsubscribe link at the very bottom
         unsubscribe = f'<br><br><hr style="border:0;border-top:1px solid #eee;margin:16px 0;"><p style="text-align:center;font-size:11px;color:#bbb;"><a href="mailto:{sender_email}?subject=Unsubscribe&body=Remove me." style="color:#bbb;">Unsubscribe</a></p>'
         full_html = f"""<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;color:#333;max-width:600px;margin:0 auto;">
 {body_html}{unsubscribe}</div>"""
@@ -635,7 +645,6 @@ SUBJECT: ...
 
     except Exception as e:
         print(f"Email build error: {e}")
-        # Fallback very short email
         fallback = f"""Dear {dev_name},<br><br>
 I came across {app_name} and noticed your rating of {rating}. For a {genre} app, this can {impact}.<br><br>
 We help developers recover their rating with genuine reviews. If you're open to a quick chat, just reply or message me on WhatsApp.<br><br>
@@ -649,7 +658,7 @@ Telegram: https://t.me/abu_raihan69"""
         full_html = f"<div>{fallback}{unsubscribe}</div>"
         return subject, full_html
 
-# ─── SPAM TEST (uses new builder) ────────────────────────────
+# ─── SPAM TEST ────────────────────────────────────────────────
 def run_spam_test(test_email):
     send("🔄 Running Spam Test...")
     try:
@@ -680,35 +689,39 @@ def run_spam_test(test_email):
         send(f"❌ Error: {e}")
         bot.send_message(state["chat_id"],".", reply_markup=kb())
 
-# ─── SCHEDULER (FIXED with debug) ────────────────────────────
+# ════════════════════════════════════════════════════════════
+#  SCHEDULER — FIXED
+#  Old bug: Sheet returns time as Date/float, "now in times" never matched.
+#  Fix 1: get_schedule_times() now normalizes all formats to "HH:MM" string.
+#  Fix 2: triggered_today dict prevents double-trigger within same minute.
+# ════════════════════════════════════════════════════════════
 def run_scheduler():
     tz = pytz.timezone('Asia/Dhaka')
-    # Send a startup message only if chat_id is known
-    if state["chat_id"]:
-        send("⏰ Scheduler started. Will check every 10 seconds.")
-    else:
-        print("Scheduler started, but no chat_id yet.")
+    print("⏰ Scheduler thread started.")
+    triggered_today = {}  # {"HH:MM": "YYYY-MM-DD"}
+
     while True:
         try:
+            now_dt = datetime.now(tz)
+            now_hm = now_dt.strftime("%H:%M")
+            today  = now_dt.strftime("%Y-%m-%d")
+
             if state["status"] == "IDLE" and state["chat_id"]:
-                now = datetime.now(tz).strftime("%H:%M")
-                times = get_schedule_times()
-                if times:
-                    # Debug: optionally send current time and times (commented out to avoid spam)
-                    # send(f"🕒 Current: {now}, Schedules: {times}")
-                    if now in times:
-                        send(f"⏰ Scheduled time *{now}* detected – starting full automation...")
+                times = get_schedule_times()  # already returns clean "HH:MM" list
+                print(f"[Scheduler] now={now_hm} | schedules={times}")
+
+                for t in times:
+                    if t == now_hm and triggered_today.get(t) != today:
+                        triggered_today[t] = today
+                        send(f"⏰ Scheduled time *{t}* — starting automation...")
+                        bot.send_message(state["chat_id"], ".", reply_markup=kb())
                         threading.Thread(target=phase1_scrape, daemon=True).start()
-                        # Wait 61 seconds to avoid re-triggering in same minute
-                        time.sleep(61)
-            time.sleep(10)
+                        break  # one trigger per loop
+
         except Exception as e:
-            error_msg = f"❌ Scheduler error: {e}"
-            if state["chat_id"]:
-                send(error_msg)
-            else:
-                print(error_msg)
-            time.sleep(10)
+            print(f"[Scheduler] Error: {e}")
+
+        time.sleep(10)
 
 # ─── BOT HANDLERS ────────────────────────────────────────────
 @bot.message_handler(commands=['start'])
@@ -798,7 +811,6 @@ def handle(message):
         bot.reply_to(message,"🔙 Main Menu.", reply_markup=kb())
         return
 
-    # State-based input handling
     if state["status"] == "WAITING_URL":
         if "script.google.com" in text:
             state["tmp_url"] = text
@@ -871,7 +883,6 @@ def handle(message):
             bot.reply_to(message,"❌ Invalid email.", reply_markup=back_kb())
         return
 
-    # Main buttons
     if text == "🚀 Start Automation":
         if state["status"] == "IDLE":
             threading.Thread(target=phase1_scrape, daemon=True).start()
@@ -884,7 +895,6 @@ def handle(message):
 
     elif text == "▶️ Resume":
         if state["status"] == "PAUSED":
-            # Resume to the appropriate phase
             if state["generated_kws"] and state["kw_index"] < len(state["generated_kws"]):
                 state["status"] = "SCRAPING"
             else:
@@ -894,7 +904,6 @@ def handle(message):
 
     elif text == "⏹️ Stop":
         if state["status"] in ["SCRAPING","FILTERING","EMAILING","PAUSED"]:
-            # Abort current run, clear local state but keep keyword set pending
             state["status"] = "IDLE"
             state["generated_kws"] = []
             state["kw_index"] = 0
