@@ -320,7 +320,7 @@ def save_qualified_lead(row):
         return False
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE (simplified for speed and yield)
+#  PHASE 1 — SCRAPE (deep search for 100+ apps per keyword)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -372,13 +372,38 @@ def phase1_scrape():
              f"Already qualified emails: *{len(state['seen_emails'])}*\n"
              f"Starting scrape with {len(generated)} keywords.")
 
-        # SIMPLIFIED search variations – just 4 high‑value ones to get 150‑200 apps per keyword
+        # DEEP SEARCH – 25+ variations + multiple countries to maximize yield
         search_variations = [
             "{kw}",
             "best {kw}",
             "top {kw}",
-            "new {kw}"
+            "new {kw}",
+            "{kw} app",
+            "{kw} free",
+            "{kw} pro",
+            "{kw} lite",
+            "popular {kw}",
+            "{kw} for android",
+            "{kw} download",
+            "{kw} latest",
+            "{kw} update",
+            "{kw} reviews",
+            "{kw} problems",
+            "{kw} complaints",
+            "apps like {kw}",
+            "similar to {kw}",
+            "{kw} alternative",
+            "best {kw} apps",
+            "top rated {kw}",
+            "{kw} version",
+            "{kw} online",
+            "{kw} offline",
+            "{kw} premium",
+            "{kw} paid"
         ]
+
+        # Multiple countries to get more apps
+        countries = ['us', 'in', 'gb']  # USA, India, UK
 
         while state["kw_index"] < len(state["generated_kws"]):
             while state["status"] == "PAUSED": time.sleep(1)
@@ -391,15 +416,15 @@ def phase1_scrape():
             raw_ids = []
             for q_template in search_variations:
                 q = q_template.format(kw=kw)
-                try:
-                    # Use n_hits=500 to get maximum results
-                    results = search(q, lang='en', country='us', n_hits=500)
-                    for r in results: raw_ids.append(r['appId'])
-                    # Minimal delay: 0.5-1 second
-                    time.sleep(random.uniform(0.5, 1.0))
-                except Exception as e:
-                    print(f"Search error for '{q}': {e}")
-                    continue
+                for country in countries:
+                    try:
+                        results = search(q, lang='en', country=country, n_hits=500)
+                        for r in results: raw_ids.append(r['appId'])
+                        # Minimal delay between searches
+                        time.sleep(random.uniform(0.5, 1.0))
+                    except Exception as e:
+                        print(f"Search error for '{q}' in {country}: {e}")
+                        continue
 
             seen_kw, ids = set(), []
             for i in raw_ids:
@@ -478,7 +503,7 @@ def phase1_scrape():
                     except Exception as e:
                         print(f"Batch save error: {e}")
 
-                # Fast delay: 0.1-0.3 seconds
+                # Fast delay between app details
                 time.sleep(random.uniform(0.1, 0.3))
 
             if batch_raw:
