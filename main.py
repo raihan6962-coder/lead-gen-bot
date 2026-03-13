@@ -437,6 +437,10 @@ def get_search_ids_for_keyword(kw):
 
 # ════════════════════════════════════════════════════════════
 #  FILTER
+#  Order: gov → no_email → dup → zero_rating → installs → rating
+#  Email checked EARLY so we skip apps with no email fast.
+#  Rating uses RELAXED ceiling (+0.5) to avoid over-filtering
+#  niches where most apps are legitimately high-rated (e.g. crypto).
 # ════════════════════════════════════════════════════════════
 def is_qualified(app_dict, max_rating, max_installs, seen_emails, stats):
     dev      = str(app_dict.get('dev_name','') or '').lower()
@@ -444,18 +448,33 @@ def is_qualified(app_dict, max_rating, max_installs, seen_emails, stats):
     installs = int(app_dict.get('installs') or 0)
     email    = str(app_dict.get('email','') or '').strip().lower()
 
+    # 1. Skip government apps
     if any(g in dev for g in GOV):
-        stats["gov"] += 1;         return False, "gov"
+        stats["gov"] += 1; return False, "gov"
+
+    # 2. Must have valid email (check early — skip no-email apps fast)
+    if not email or '@' not in email or '.' not in email.split('@')[-1]:
+        stats["no_email"] += 1; return False, "no_email"
+
+    # 3. Skip duplicate emails
+    if email in seen_emails:
+        stats["dup"] += 1; return False, "dup"
+
+    # 4. Skip apps with 0 rating (brand new, unreviewed)
     if rating == 0.0:
         stats["zero_rating"] += 1; return False, "zero_rating"
-    if rating > max_rating:
-        stats["rating"] += 1;      return False, "rating"
+
+    # 5. Installs filter — skip huge popular apps (they rarely respond)
     if installs > max_installs:
-        stats["installs"] += 1;    return False, "installs"
-    if not email or '@' not in email:
-        stats["no_email"] += 1;    return False, "no_email"
-    if email in seen_emails:
-        stats["dup"] += 1;         return False, "dup"
+        stats["installs"] += 1; return False, "installs"
+
+    # 6. Rating filter with +0.5 relaxed ceiling
+    #    So if Sheet says max_rating=4.0 → we accept up to 4.5
+    #    This prevents over-filtering in niches where good apps rate high
+    relaxed_max = min(max_rating + 0.5, 4.9)
+    if rating > relaxed_max:
+        stats["rating"] += 1; return False, "rating"
+
     stats["passed"] += 1
     return True, "passed"
 
@@ -518,10 +537,15 @@ def phase1_scrape():
         state["kw_index"]      = 0
         state["total_scraped"] = 0
 
+        relaxed_rating = min(max_rating + 0.5, 4.9)
         send(f"✅ Already in DB: *{len(state['scraped_ids'])}* apps\n"
              f"Existing qualified emails: *{len(state['seen_emails'])}*\n"
              f"Starting scrape with *{len(generated)}* keywords\n"
-             f"Filter: rating ≤ {max_rating} | installs ≤ {max_installs:,}")
+             f"Filter settings:\n"
+             f"  • Max rating: ≤ {relaxed_rating} (relaxed from {max_rating})\n"
+             f"  • Max installs: ≤ {max_installs:,}\n"
+             f"  • Email required: ✅\n"
+             f"\n💡 To get more leads: increase max_rating or max_installs in Settings sheet.")
 
         while state["kw_index"] < len(state["generated_kws"]):
             while state["status"] == "PAUSED": time.sleep(1)
@@ -600,10 +624,22 @@ def phase1_scrape():
                 except: pass
 
             state["kw_stats"][kw] = {"apps": kw_count, "qualified": qualified_from_kw}
+
+            # Build smart filter summary with suggestions
+            fs = filter_stats
+            total_dropped = fs['gov']+fs['zero_rating']+fs['rating']+fs['installs']+fs['no_email']+fs['dup']
+            hint = ""
+            if fs['rating'] > 0 and fs['passed'] == 0:
+                hint = f"\n💡 Tip: {fs['rating']} apps dropped by rating filter. Increase max_rating in Settings."
+            elif fs['no_email'] > 0 and fs['passed'] == 0:
+                hint = f"\n💡 Tip: {fs['no_email']} apps had no email. Try different keyword category."
+            elif fs['installs'] > 0 and fs['passed'] == 0:
+                hint = f"\n💡 Tip: {fs['installs']} apps too popular. Increase max_installs in Settings."
+
             send(f"✅ `{kw}` done — {kw_count} apps | {qualified_from_kw} qualified\n"
-                 f"📊 Gov:{filter_stats['gov']} ZeroRating:{filter_stats['zero_rating']} "
-                 f"HighRating:{filter_stats['rating']} HighInstalls:{filter_stats['installs']} "
-                 f"NoEmail:{filter_stats['no_email']} Dup:{filter_stats['dup']} ✅Passed:{filter_stats['passed']}\n"
+                 f"📊 NoEmail:{fs['no_email']} Dup:{fs['dup']} ZeroRating:{fs['zero_rating']} "
+                 f"HighRating:{fs['rating']} HighInstalls:{fs['installs']} Gov:{fs['gov']} ✅Passed:{fs['passed']}"
+                 f"{hint}\n"
                  f"Total: *{state['total_scraped']}* scraped | *{state['qualified_count']}* qualified")
 
             state["kw_index"] += 1
