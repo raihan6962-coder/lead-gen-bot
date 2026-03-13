@@ -39,7 +39,8 @@ state = {
     "qualified_count":0,
     "seen_emails":    set(),
     "settings":       {},
-    "kw_stats":       {},  # track per-keyword stats for monitoring
+    "kw_stats":       {},
+    "ai_working":     True,  # assume AI works initially
 }
 
 GOV = ['gov','government','ministry','department','council',
@@ -280,15 +281,70 @@ Comma separated list only. No numbers, no bullets, no explanations."""
         return terms
     except Exception as e:
         send(f"❌ Groq failed: {e}. Using fallback generator.")
+        state["ai_working"] = False  # mark AI as not working
         fallback = fallback_keywords(base)
         send(f"✅ Generated {len(fallback)} fallback keywords.")
         return fallback
 
 # ════════════════════════════════════════════════════════════
-#  AI SEARCH VARIATION GENERATOR (per keyword)
+#  FALLBACK SEARCH VARIATIONS (rich set, no AI needed)
+# ════════════════════════════════════════════════════════════
+def get_fallback_search_variations(keyword):
+    """Return a comprehensive list of search variations for a keyword."""
+    templates = [
+        "{kw}", "best {kw}", "top {kw}", "new {kw}", "{kw} app",
+        "{kw} free", "{kw} pro", "{kw} lite", "{kw} 2025", "popular {kw}",
+        "{kw} for android", "{kw} download", "{kw} latest", "{kw} update",
+        "{kw} reviews", "{kw} problems", "{kw} complaints",
+        "apps like {kw}", "similar to {kw}", "{kw} alternative",
+        "best {kw} apps", "top rated {kw}", "{kw} version",
+        "{kw} online", "{kw} offline", "{kw} premium", "{kw} paid",
+        "{kw} rating", "{kw} store", "{kw} guide", "{kw} tutorial",
+        "{kw} help", "{kw} support", "{kw} community", "{kw} forum",
+        "top 10 {kw}", "best {kw} 2025", "new {kw} apps", "trending {kw}",
+        "{kw} for beginners", "{kw} expert", "{kw} pro version",
+        "{kw} tips", "{kw} tricks", "{kw} hacks", "{kw} secrets",
+        "{kw} features", "{kw} comparison", "{kw} vs", "{kw} alternatives",
+        "{kw} review", "{kw} ratings", "{kw} score", "{kw} installs",
+        "{kw} users", "{kw} feedback", "{kw} suggestions", "{kw} issues",
+        "{kw} bugs", "{kw} crash", "{kw} fix", "{kw} solution",
+        "{kw} workaround", "{kw} news", "{kw} blog", "{kw} official",
+        "{kw} website", "{kw} login", "{kw} signup", "{kw} account",
+        "{kw} profile", "{kw} settings", "{kw} preferences", "{kw} options",
+        "{kw} dark mode", "{kw} light mode", "{kw} theme", "{kw} widget",
+        "{kw} shortcut", "{kw} launcher", "{kw} icon pack", "{kw} wallpaper",
+        "{kw} background", "{kw} notification", "{kw} sound", "{kw} ringtone",
+        "{kw} alarm", "{kw} timer", "{kw} stopwatch", "{kw} calculator",
+        "{kw} converter", "{kw} translator", "{kw} dictionary", "{kw} thesaurus",
+        "{kw} encyclopedia", "{kw} game", "{kw} quiz", "{kw} puzzle",
+        "{kw} challenge", "{kw} multiplayer", "{kw} single player", "{kw} offline game",
+        "{kw} online game", "{kw} strategy", "{kw} action", "{kw} adventure",
+        "{kw} role playing", "{kw} simulation", "{kw} sports", "{kw} racing",
+        "{kw} fighting", "{kw} card game", "{kw} board game", "{kw} word game",
+        "{kw} trivia", "{kw} knowledge", "{kw} education", "{kw} learning",
+        "{kw} course", "{kw} training", "{kw} certification", "{kw} exam",
+        "{kw} test", "{kw} practice", "{kw} flashcard"
+    ]
+    variations = [tmpl.format(kw=keyword) for tmpl in templates]
+    # Remove duplicates and very short/long
+    seen = set()
+    result = []
+    for v in variations:
+        v = re.sub(r'\s+', ' ', v).strip()
+        if 2 < len(v) < 60 and v not in seen:
+            seen.add(v)
+            result.append(v)
+    return result[:50]  # return up to 50
+
+# ════════════════════════════════════════════════════════════
+#  AI SEARCH VARIATION GENERATOR (with fallback)
 # ════════════════════════════════════════════════════════════
 def generate_search_variations(keyword, previous_yield=None):
-    """Use AI to create 20-30 effective search phrases for a given keyword."""
+    """Use AI to create effective search phrases. Fallback if fails."""
+    if not state["ai_working"]:
+        # AI already failed, use fallback directly without logging
+        return get_fallback_search_variations(keyword)
+
     send(f"🧠 Generating smart search variations for '{keyword}'...")
     context = ""
     if previous_yield is not None:
@@ -310,19 +366,22 @@ Return as a comma-separated list. No numbers, no bullets, no explanations."""
             if 2 < len(v) < 60 and v not in variations:
                 variations.append(v)
         if len(variations) < 5:
-            # fallback to some basic ones
-            variations = [keyword, f"best {keyword}", f"top {keyword}", f"new {keyword}", f"{keyword} app"]
+            # fallback to basic ones
+            variations = get_fallback_search_variations(keyword)
         send(f"✅ Generated {len(variations)} search variations.")
         return variations[:30]
     except Exception as e:
-        send(f"❌ Variation generation failed: {e}. Using basic fallback.")
-        return [keyword, f"best {keyword}", f"top {keyword}", f"new {keyword}", f"{keyword} app"]
+        send(f"❌ Variation generation failed. Using fallback.")
+        state["ai_working"] = False  # mark AI as failed
+        return get_fallback_search_variations(keyword)
 
 # ════════════════════════════════════════════════════════════
-#  AI MONITORING & OPTIMIZATION
+#  AI MONITORING & OPTIMIZATION (skip if AI not working)
 # ════════════════════════════════════════════════════════════
 def monitor_and_optimize():
     """Called after each keyword or when issues arise. Sends stats to AI for suggestions."""
+    if not state["ai_working"]:
+        return  # skip if AI is down
     # Gather recent stats
     total_kws = len(state["generated_kws"])
     processed = state["kw_index"]
@@ -396,6 +455,7 @@ def phase1_scrape():
         print("Cannot start phase1: no chat_id")
         return
     state["status"] = "SCRAPING"
+    state["ai_working"] = True  # reset AI status for this run
     bot.send_message(cid, "🔄 Automation started. Use buttons below.", reply_markup=kb())
 
     try:
@@ -452,17 +512,17 @@ def phase1_scrape():
             kw = state["generated_kws"][state["kw_index"]]
             send(f"🔍 *KW {state['kw_index']+1}/{len(state['generated_kws'])}:* `{kw}`")
 
-            # Generate search variations for this keyword
+            # Generate search variations for this keyword (use fallback if AI fails)
             variations = generate_search_variations(kw)
             retry_count = 0
-            max_retries = 2
+            max_retries = 1  # reduced to 1 retry
             total_ids_for_kw = 0
 
             while retry_count <= max_retries:
                 if retry_count > 0:
                     send(f"🔄 Retry {retry_count} for '{kw}' with improved variations...")
-                    # Generate new variations based on low yield
-                    variations = generate_search_variations(kw, previous_yield=total_ids_for_kw)
+                    # Use fallback directly for retry to avoid repeated AI calls
+                    variations = get_fallback_search_variations(kw)
 
                 raw_ids = []
                 for q in variations:
@@ -486,9 +546,9 @@ def phase1_scrape():
                     break  # good yield, proceed
                 retry_count += 1
                 if retry_count > max_retries:
-                    send(f"⚠️ Low yield for '{kw}': only {total_ids_for_kw} apps found after retries.")
+                    send(f"⚠️ Low yield for '{kw}': only {total_ids_for_kw} apps found after retry.")
                 else:
-                    send(f"⚠️ Only {total_ids_for_kw} apps found. Retrying with smarter variations...")
+                    send(f"⚠️ Only {total_ids_for_kw} apps found. Retrying with more variations...")
 
             send(f"📦 *{total_ids_for_kw}* new apps to fetch for `{kw}`")
 
@@ -577,8 +637,8 @@ def phase1_scrape():
 
             state["kw_index"] += 1
 
-            # After each keyword, run monitor to check overall progress
-            if state["kw_index"] % 5 == 0:  # every 5 keywords
+            # After each keyword, run monitor to check overall progress (if AI works)
+            if state["ai_working"] and state["kw_index"] % 5 == 0:
                 threading.Thread(target=monitor_and_optimize, daemon=True).start()
 
         if state["status"] != "IDLE" and state["current_set_id"]:
