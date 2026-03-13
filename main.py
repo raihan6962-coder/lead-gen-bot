@@ -522,12 +522,11 @@ def phase1_scrape():
         max_rating   = float(str(settings.get('max_rating','4.8')).strip())
         MIN_LEADS    = 100
 
-        # Load already-processed IDs and emails from Sheet
-        try:
-            existing = requests.post(SHEET_URL, json={"action":"get_scraped_ids"}, timeout=20).json()
-            state["scraped_ids"] = set(existing) if isinstance(existing, list) else set()
-        except:
-            state["scraped_ids"] = set()
+        # scraped_ids = only tracks IDs fetched in THIS session.
+        # Do NOT load from DB — that was blocking search results
+        # (2851 old IDs would filter out ALL search results for popular keywords).
+        # Instead: use seen_emails to block duplicate leads (that's what matters).
+        state["scraped_ids"] = set()  # fresh each run — avoids blocking search results
 
         try:
             existing_emails = requests.post(SHEET_URL, json={"action":"get_qualified_emails"}, timeout=20).json()
@@ -548,9 +547,10 @@ def phase1_scrape():
         state["kw_stats"]        = {}
 
         relaxed = min(max_rating + 0.5, 4.9)
-        send(f"🎯 Target: *{MIN_LEADS} qualified leads* from keyword: *{base_kw}*\n"
+        send(f"🎯 Target: *{MIN_LEADS} qualified leads* from: *{base_kw}*\n"
              f"Filter: rating ≤ {relaxed} | installs ≤ {max_installs:,}\n"
-             f"Already in DB: {len(state['scraped_ids'])} apps | {len(state['seen_emails'])} emails")
+             f"Existing qualified emails blocked: *{len(state['seen_emails'])}*\n"
+             f"_(Search is fresh — no old IDs blocking results)_")
 
         round_num = 0
 
@@ -598,9 +598,14 @@ def phase1_scrape():
                     if state["status"] == "IDLE": break
 
                     state["scraped_ids"].add(app_id)
-                    try:
-                        d = gplay(app_id, lang='en', country='us')
-                    except:
+                    d = None
+                    for _att in range(2):
+                        try:
+                            d = gplay(app_id, lang='en', country='us')
+                            break
+                        except Exception as _ge:
+                            if _att == 0: time.sleep(1)
+                    if not d:
                         continue
 
                     email, esrc = get_email(d)
