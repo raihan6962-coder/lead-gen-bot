@@ -392,8 +392,8 @@ def is_qualified(app_dict, max_rating, max_installs, seen_emails, stats):
         stats["zero_rating"] += 1; return False, "zero_rating"
     if installs > max_installs:
         stats["installs"] += 1; return False, "installs"
-    relaxed_max = min(max_rating + 0.5, 5.0)
-    if rating > relaxed_max:
+    # Strict rating filter: must be BELOW max_rating (e.g. <4.0 if sheet says 4.0)
+    if rating >= max_rating:
         stats["rating"] += 1; return False, "rating"
     stats["passed"] += 1
     return True, "passed"
@@ -474,20 +474,19 @@ def phase1_scrape():
             # Round 2: installs ×5, rating +0.3
             # Round 3: installs ×20, rating +0.6
             # Round 4+: no installs limit, rating = 5.0 (accept everything with email)
+            # Rating is ALWAYS strict (< sheet value) — never relaxed
+            # Only installs limit relaxes each round
+            cur_max_rating = base_max_rating  # always strict, e.g. < 4.0
             if round_num == 1:
                 cur_max_installs = base_max_installs
-                cur_max_rating   = base_max_rating
             elif round_num == 2:
-                cur_max_installs = base_max_installs * 5
-                cur_max_rating   = min(base_max_rating + 0.3, 5.0)
+                cur_max_installs = base_max_installs * 10
             elif round_num == 3:
-                cur_max_installs = base_max_installs * 20
-                cur_max_rating   = min(base_max_rating + 0.6, 5.0)
+                cur_max_installs = base_max_installs * 50
             else:
-                cur_max_installs = 999_999_999  # effectively unlimited
-                cur_max_rating   = 5.0           # accept all ratings
+                cur_max_installs = 999_999_999  # unlimited installs, rating still strict
 
-            send(f"🔄 *Round {round_num}* | Filter: rating ≤ {cur_max_rating} | "
+            send(f"🔄 *Round {round_num}* | Filter: rating < {cur_max_rating} (strict) | "
                  f"installs ≤ {cur_max_installs:,}")
 
             # Generate fresh keywords each round
@@ -503,10 +502,6 @@ def phase1_scrape():
             while state["kw_index"] < len(state["generated_kws"]):
                 while state["status"] == "PAUSED": time.sleep(1)
                 if state["status"] == "IDLE": return
-
-                # Early exit if target already reached mid-round
-                if state["qualified_count"] >= MIN_LEADS:
-                    break
 
                 kw    = state["generated_kws"][state["kw_index"]]
                 kw_no = state["kw_index"] + 1
@@ -530,7 +525,6 @@ def phase1_scrape():
                 for app_id in ids:
                     while state["status"] == "PAUSED": time.sleep(1)
                     if state["status"] == "IDLE": break
-                    if state["qualified_count"] >= MIN_LEADS: break
 
                     state["scraped_ids"].add(app_id)
                     d = None
@@ -668,32 +662,36 @@ def phase2_email_only():
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE": break
 
-            # ── Sender selection with auto-rotation ──
-            sender = None
+            # ── Fetch fresh sender list each email — immediate switch when limit hit ──
+            sender  = None
+            senders = []
             try:
                 senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
-                # Pick first sender that still has quota remaining
-                for s in senders:
-                    if int(s.get('sent', 0)) < int(s.get('limit', 1)):
-                        sender = s
-                        break
             except Exception as e:
                 print(f"Error fetching senders: {e}")
                 time.sleep(3); continue
 
-            if not sender:
-                # All senders exhausted — show status and pause
-                info = "⚠️ *All senders hit daily limit!*\n\n"
+            for s in senders:
                 try:
-                    for s in senders:
-                        info += f"📧 {s['email']}: {s.get('sent',0)}/{s.get('limit',0)} sent\n"
-                except: pass
-                info += "\nResume tomorrow after limits reset."
+                    sent  = int(s.get('sent', 0))
+                    limit = int(s.get('limit', 0))
+                    if limit > 0 and sent < limit:
+                        sender = s
+                        break
+                except:
+                    continue
+
+            if not sender:
+                info = "⚠️ *All senders hit daily limit!*\n\n"
+                for s in senders:
+                    info += f"📧 `{s.get('email','')}` — {s.get('sent',0)}/{s.get('limit',0)} sent\n"
+                info += "\nBot paused. Resume tomorrow after limits reset."
                 send(info)
                 state["status"] = "PAUSED"
                 bot.send_message(cid, ".", reply_markup=kb()); break
-            email  = str(row.get('email',''))
-            esrc   = str(row.get('email_source','dev'))
+
+            email = str(row.get('email',''))
+            esrc  = str(row.get('email_source','dev'))
 
             subject, body_html = build_clean_email(row, sender['email'], email_prompt)
 
@@ -894,29 +892,38 @@ BODY: [email starting with Dear {dev_name},]"""
 
 # ─── SPAM TEST ────────────────────────────────────────────────
 def run_spam_test_with_sender(test_email, sender):
-    settings     = get_settings()
-    email_prompt = settings.get('email_prompt','Write a professional cold outreach email.')
-    fake_row = {
-        "app_name":    "Demo Budget Tracker",
-        "dev_name":    "Indie Studio",
-        "rating":      3.1,
-        "genre":       "Finance",
-        "website":     "",
-        "description": "A simple app to track daily expenses and manage personal budgets.",
-        "summary":     "Personal budget tracker with smart expense categories",
-    }
-    subject, body = build_clean_email(fake_row, sender['email'], email_prompt)
+    """Send a test email — uses static template so AI failures don't block it."""
+    sender_email = sender.get('email', 'your@email.com')
+    subject = "Test: Can You See This? [ASO Audit]"
+    body = f"""<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;color:#333;max-width:600px;margin:0 auto;">
+<p>Hi Developer,</p>
+<p>This is a <strong>test email</strong> from your Leadgen automation bot.</p>
+<p>If you received this, your sender <code>{sender_email}</code> is working correctly ✅</p>
+<p>Your bot is ready to send personalized cold outreach emails to app developers on Google Play Store.</p>
+<p>Each real email will be AI-personalized based on the app's name, rating, genre, and developer info.</p>
+<hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
+<p style="font-size:12px;color:#888;">
+Sent via Leadgen Bot | Sender: {sender_email}<br>
+<a href="mailto:{sender_email}?subject=Unsubscribe&body=Remove me." style="color:#bbb;">Unsubscribe</a>
+</p>
+</div>"""
+    send(f"📤 Sending test to `{test_email}` via `{sender_email}`...")
     try:
-        r2   = requests.post(sender['url'],
-                 json={"action":"send_email","to":test_email,"subject":subject,"body":body},
-                 timeout=30)
+        r2   = requests.post(
+            sender['url'],
+            json={{"action":"send_email","to":test_email,"subject":subject,"body":body}},
+            timeout=30
+        )
         resp = r2.text.strip()
         if resp == "Success":
-            send(f"✅ Test sent to `{test_email}` via {sender['email']}\n📌 Subject: {subject}")
+            send(f"✅ *Test email sent!*\nTo: `{test_email}`\nVia: `{sender_email}`\n📌 Subject: {subject}")
         else:
-            send(f"❌ Failed: {resp}")
+            send(f"❌ *Sender returned error:* `{resp}`\n\n"
+                 f"Check:\n• Is the Apps Script URL correct?\n• Is the script deployed as \'Anyone\'?\n• Does the script have Gmail permission?")
+    except requests.exceptions.Timeout:
+        send(f"❌ *Timeout* — Apps Script URL took too long. Check the URL is correct.")
     except Exception as e:
-        send(f"❌ Error: {e}")
+        send(f"❌ *Error sending test:* `{e}`")
 
 def show_sender_selection(test_email):
     try:
