@@ -39,6 +39,7 @@ state = {
     "qualified_count":0,
     "seen_emails":    set(),
     "settings":       {},
+    "kw_stats":       {},  # track per-keyword stats for monitoring
 }
 
 GOV = ['gov','government','ministry','department','council',
@@ -168,7 +169,7 @@ def delete_schedule_time(time_str):
         print(f"delete_schedule_time error: {e}")
 
 # ════════════════════════════════════════════════════════════
-#  AI KEYWORD GENERATION with CLEAN FALLBACK
+#  AI KEYWORD GENERATION (200 base keywords)
 # ════════════════════════════════════════════════════════════
 def fallback_keywords(base):
     """Generate exactly 200 unique, realistic search keywords without random numbers."""
@@ -284,6 +285,73 @@ Comma separated list only. No numbers, no bullets, no explanations."""
         return fallback
 
 # ════════════════════════════════════════════════════════════
+#  AI SEARCH VARIATION GENERATOR (per keyword)
+# ════════════════════════════════════════════════════════════
+def generate_search_variations(keyword, previous_yield=None):
+    """Use AI to create 20-30 effective search phrases for a given keyword."""
+    send(f"🧠 Generating smart search variations for '{keyword}'...")
+    context = ""
+    if previous_yield is not None:
+        context = f"Previous attempt with this keyword yielded only {previous_yield} apps. Please suggest more effective variations."
+    prompt = f"""{context}
+You are a Google Play Store search expert. Create 25 unique, realistic search phrases for the keyword "{keyword}" that will find many relevant Android apps.
+Each phrase should be 2-5 words, natural, and commonly used by users.
+Return as a comma-separated list. No numbers, no bullets, no explanations."""
+    try:
+        r = ai.chat.completions.create(
+            messages=[{"role":"user","content":prompt}],
+            model="llama-3.1-8b-instant",
+            max_tokens=1000
+        )
+        raw = r.choices[0].message.content.replace('\n',',').replace('\r',',')
+        variations = []
+        for v in raw.split(','):
+            v = re.sub(r'^\s+', '', v).strip()
+            if 2 < len(v) < 60 and v not in variations:
+                variations.append(v)
+        if len(variations) < 5:
+            # fallback to some basic ones
+            variations = [keyword, f"best {keyword}", f"top {keyword}", f"new {keyword}", f"{keyword} app"]
+        send(f"✅ Generated {len(variations)} search variations.")
+        return variations[:30]
+    except Exception as e:
+        send(f"❌ Variation generation failed: {e}. Using basic fallback.")
+        return [keyword, f"best {keyword}", f"top {keyword}", f"new {keyword}", f"{keyword} app"]
+
+# ════════════════════════════════════════════════════════════
+#  AI MONITORING & OPTIMIZATION
+# ════════════════════════════════════════════════════════════
+def monitor_and_optimize():
+    """Called after each keyword or when issues arise. Sends stats to AI for suggestions."""
+    # Gather recent stats
+    total_kws = len(state["generated_kws"])
+    processed = state["kw_index"]
+    remaining = total_kws - processed
+    avg_scraped = state["total_scraped"] / max(processed, 1)
+    avg_qualified = state["qualified_count"] / max(processed, 1)
+    prompt = f"""You are monitoring a Play Store scraping bot. Here are current stats:
+- Keywords processed: {processed}/{total_kws}
+- Total apps scraped: {state['total_scraped']} (avg {avg_scraped:.1f} per keyword)
+- Total qualified leads: {state['qualified_count']} (avg {avg_qualified:.1f} per keyword)
+- Remaining keywords: {remaining}
+
+If you notice any issues (e.g., low yield), suggest improvements in 1-2 sentences.
+If everything is fine, just say "All good"."""
+    try:
+        r = ai.chat.completions.create(
+            messages=[{"role":"user","content":prompt}],
+            model="llama-3.1-8b-instant",
+            max_tokens=150
+        )
+        suggestion = r.choices[0].message.content.strip()
+        if "all good" not in suggestion.lower():
+            send(f"🤖 AI Monitor: {suggestion}")
+        else:
+            print(f"AI Monitor: {suggestion}")
+    except Exception as e:
+        print(f"Monitor error: {e}")
+
+# ════════════════════════════════════════════════════════════
 #  FILTER A SINGLE APP
 # ════════════════════════════════════════════════════════════
 def is_qualified(app_dict, max_rating, max_installs, seen_emails):
@@ -320,7 +388,7 @@ def save_qualified_lead(row):
         return False
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE (deep search for 100+ apps per keyword)
+#  PHASE 1 — SCRAPE (with AI-generated variations & retries)
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -356,6 +424,7 @@ def phase1_scrape():
 
         state["current_set_id"] = set_id
         state["qualified_count"] = 0
+        state["kw_stats"] = {}
 
         generated = generate_keywords_from_base(base_kw)
         if not generated:
@@ -372,38 +441,8 @@ def phase1_scrape():
              f"Already qualified emails: *{len(state['seen_emails'])}*\n"
              f"Starting scrape with {len(generated)} keywords.")
 
-        # DEEP SEARCH – 25+ variations + multiple countries to maximize yield
-        search_variations = [
-            "{kw}",
-            "best {kw}",
-            "top {kw}",
-            "new {kw}",
-            "{kw} app",
-            "{kw} free",
-            "{kw} pro",
-            "{kw} lite",
-            "popular {kw}",
-            "{kw} for android",
-            "{kw} download",
-            "{kw} latest",
-            "{kw} update",
-            "{kw} reviews",
-            "{kw} problems",
-            "{kw} complaints",
-            "apps like {kw}",
-            "similar to {kw}",
-            "{kw} alternative",
-            "best {kw} apps",
-            "top rated {kw}",
-            "{kw} version",
-            "{kw} online",
-            "{kw} offline",
-            "{kw} premium",
-            "{kw} paid"
-        ]
-
-        # Multiple countries to get more apps
-        countries = ['us', 'in', 'gb']  # USA, India, UK
+        # Countries to search
+        countries = ['us', 'in', 'gb']
 
         while state["kw_index"] < len(state["generated_kws"]):
             while state["status"] == "PAUSED": time.sleep(1)
@@ -413,26 +452,45 @@ def phase1_scrape():
             kw = state["generated_kws"][state["kw_index"]]
             send(f"🔍 *KW {state['kw_index']+1}/{len(state['generated_kws'])}:* `{kw}`")
 
-            raw_ids = []
-            for q_template in search_variations:
-                q = q_template.format(kw=kw)
-                for country in countries:
-                    try:
-                        results = search(q, lang='en', country=country, n_hits=500)
-                        for r in results: raw_ids.append(r['appId'])
-                        # Minimal delay between searches
-                        time.sleep(random.uniform(0.5, 1.0))
-                    except Exception as e:
-                        print(f"Search error for '{q}' in {country}: {e}")
-                        continue
+            # Generate search variations for this keyword
+            variations = generate_search_variations(kw)
+            retry_count = 0
+            max_retries = 2
+            total_ids_for_kw = 0
 
-            seen_kw, ids = set(), []
-            for i in raw_ids:
-                if i not in seen_kw and i not in state["scraped_ids"]:
-                    seen_kw.add(i)
-                    ids.append(i)
+            while retry_count <= max_retries:
+                if retry_count > 0:
+                    send(f"🔄 Retry {retry_count} for '{kw}' with improved variations...")
+                    # Generate new variations based on low yield
+                    variations = generate_search_variations(kw, previous_yield=total_ids_for_kw)
 
-            send(f"📦 *{len(ids)}* new apps to fetch for `{kw}`")
+                raw_ids = []
+                for q in variations:
+                    for country in countries:
+                        try:
+                            results = search(q, lang='en', country=country, n_hits=500)
+                            for r in results: raw_ids.append(r['appId'])
+                            time.sleep(random.uniform(0.5, 1.0))
+                        except Exception as e:
+                            print(f"Search error for '{q}' in {country}: {e}")
+                            continue
+
+                seen_kw, ids = set(), []
+                for i in raw_ids:
+                    if i not in seen_kw and i not in state["scraped_ids"]:
+                        seen_kw.add(i)
+                        ids.append(i)
+
+                total_ids_for_kw = len(ids)
+                if total_ids_for_kw >= 50:
+                    break  # good yield, proceed
+                retry_count += 1
+                if retry_count > max_retries:
+                    send(f"⚠️ Low yield for '{kw}': only {total_ids_for_kw} apps found after retries.")
+                else:
+                    send(f"⚠️ Only {total_ids_for_kw} apps found. Retrying with smarter variations...")
+
+            send(f"📦 *{total_ids_for_kw}* new apps to fetch for `{kw}`")
 
             kw_count = 0
             batch_raw = []
@@ -503,7 +561,6 @@ def phase1_scrape():
                     except Exception as e:
                         print(f"Batch save error: {e}")
 
-                # Fast delay between app details
                 time.sleep(random.uniform(0.1, 0.3))
 
             if batch_raw:
@@ -513,10 +570,16 @@ def phase1_scrape():
                         timeout=30)
                 except: pass
 
+            # Store stats for this keyword
+            state["kw_stats"][kw] = {"apps": kw_count, "qualified": qualified_from_kw}
             send(f"✅ KW `{kw}` done — {kw_count} apps scraped, {qualified_from_kw} qualified\n"
                  f"Total scraped: *{state['total_scraped']}*, Total qualified so far: *{state['qualified_count']}*")
 
             state["kw_index"] += 1
+
+            # After each keyword, run monitor to check overall progress
+            if state["kw_index"] % 5 == 0:  # every 5 keywords
+                threading.Thread(target=monitor_and_optimize, daemon=True).start()
 
         if state["status"] != "IDLE" and state["current_set_id"]:
             mark_keyword_set_used(state["current_set_id"])
