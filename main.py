@@ -476,20 +476,27 @@ def phase1_scrape():
 
         round_num = 0
 
-        # ── OUTER LOOP: each round = new keywords + possibly relaxed filter ─
+        # ── OUTER LOOP: each round = new keywords + relaxed installs filter ─
+        # Max 5 rounds to prevent infinite loop
+        MAX_ROUNDS = 5
         while True:
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE": return
 
             round_num += 1
+            if round_num > MAX_ROUNDS:
+                send(f"⚠️ Reached max {MAX_ROUNDS} rounds. "
+                     f"Collected *{state['qualified_count']}* leads total. Proceeding to email phase.")
+                break
 
-            # ── Auto-relax filter each round ──────────────────────────────
-            # Round 1: use Sheet settings as-is
-            # Round 2: installs ×5, rating +0.3
-            # Round 3: installs ×20, rating +0.6
-            # Round 4+: no installs limit, rating = 5.0 (accept everything with email)
-            # Rating is ALWAYS strict (< sheet value) — never relaxed
-            # Only installs limit relaxes each round
+            # ── Filter per round ─────────────────────────────────────────
+            # Rating is ALWAYS strict (< sheet value) — NEVER relaxed.
+            # Only installs limit gets looser each round so we can find more leads.
+            # Round 1: strict installs from sheet
+            # Round 2: installs ×10
+            # Round 3: installs ×50
+            # Round 4+: unlimited installs (only email+rating required)
+            # Max 5 rounds to prevent infinite loop.
             cur_max_rating = base_max_rating  # always strict, e.g. < 4.0
             if round_num == 1:
                 cur_max_installs = base_max_installs
@@ -582,6 +589,10 @@ def phase1_scrape():
                             state["seen_emails"].add(email)
                             state["qualified_count"] += 1
                             qualified_from_kw += 1
+                            # Notify when target first hit — but keep scraping remaining keywords
+                            if state["qualified_count"] == MIN_LEADS:
+                                send(f"🎯 *{MIN_LEADS} lead target reached!* "
+                                     f"Continuing to scrape remaining keywords...")
 
                     kw_count               += 1
                     state["total_scraped"] += 1
@@ -620,12 +631,13 @@ def phase1_scrape():
                      f"Total apps scraped: *{state['total_scraped']}*")
                 break
 
-            # Under target — report and relax filter for next round
+            # Under target — relax installs for next round (rating stays strict always)
             still_need = MIN_LEADS - state["qualified_count"]
-            next_installs = (base_max_installs * (5 ** round_num)) if round_num < 3 else 999_999_999
-            next_rating   = min(base_max_rating + 0.3 * round_num, 5.0)
+            if round_num == 1:   next_installs = base_max_installs * 10
+            elif round_num == 2: next_installs = base_max_installs * 50
+            else:                next_installs = 999_999_999
             send(f"⚠️ Round {round_num} done — *{state['qualified_count']}* leads | need {still_need} more.\n"
-                 f"🔓 Relaxing filter: rating ≤ {next_rating} | installs ≤ {min(next_installs,999_999_999):,}\n"
+                 f"🔓 Next round: installs ≤ {next_installs:,} | rating still strictly < {base_max_rating}\n"
                  f"Starting Round {round_num+1}...")
         # ── end outer loop ──────────────────────────────────────────────────
 
