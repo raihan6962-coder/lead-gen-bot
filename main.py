@@ -106,13 +106,25 @@ def back_kb():
     return m
 
 def send(text, md="Markdown"):
-    if state["chat_id"]:
-        try:    bot.send_message(state["chat_id"], text, parse_mode=md)
-        except:
+    if not state["chat_id"]:
+        print(f"[NO CHAT_ID] {text[:120]}")
+        return
+    try:
+        bot.send_message(state["chat_id"], text, parse_mode=md)
+    except Exception as e:
+        err = str(e).lower()
+        # Markdown parse error → send as plain text
+        if "can't parse" in err or "parse" in err or "entity" in err:
+            try:
+                # Strip all markdown before retrying
+                plain = re.sub(r'[*_`\[\]]', '', text)
+                bot.send_message(state["chat_id"], plain)
+            except Exception as e2:
+                print(f"[SEND ERR] {e2} | text={text[:80]}")
+        else:
             try: bot.send_message(state["chat_id"], text)
-            except: pass
-    else:
-        print(f"[NO CHAT_ID] {text}")
+            except Exception as e2:
+                print(f"[SEND ERR] {e2}")
 
 def parse_time(s):
     s = s.strip().upper()
@@ -374,7 +386,8 @@ def get_search_ids_for_keyword(kw):
 # ════════════════════════════════════════════════════════════
 #  FILTER
 #  Order: gov → no_email → dup → zero_rating → installs → rating
-#  Rating uses relaxed ceiling (+0.5) to prevent over-filtering.
+#  Rating is STRICT: must be < max_rating (e.g. < 4.0 means 3.9 and below only).
+#  Installs auto-relax each round. Rating never relaxes.
 # ════════════════════════════════════════════════════════════
 def is_qualified(app_dict, max_rating, max_installs, seen_emails, stats):
     dev      = str(app_dict.get('dev_name','') or '').lower()
@@ -429,6 +442,7 @@ def phase1_scrape():
     bot.send_message(cid, "🔄 Automation started.", reply_markup=kb())
 
     try:
+        state["settings"] = {}  # always fresh — never use stale cached settings
         settings         = get_settings()
         base_max_installs = int(str(settings.get('max_installs','500000')).replace(',','').strip())
         base_max_rating   = float(str(settings.get('max_rating','4.8')).strip())
@@ -712,31 +726,44 @@ def phase2_email_only():
 
                 state["total_emailed"] += 1
                 etag = {"dev":"📧","support":"📩","extracted":"📬"}.get(esrc,"📬")
+                sent_now  = int(sender.get('sent', 0)) + 1
+                limit     = int(sender.get('limit', 1))
+                remaining = max(0, limit - sent_now)
+                quota_str = f"{sent_now}/{limit} — {remaining} left" if remaining > 0 else f"{sent_now}/{limit} — LIMIT REACHED"
 
-                # Check remaining quota for this sender
-                sent_now = int(sender.get('sent', 0)) + 1
-                limit    = int(sender.get('limit', 1))
-                remaining = limit - sent_now
-                quota_note = f"(quota: {sent_now}/{limit}"
-                if remaining <= 0:
-                    quota_note += " — LIMIT REACHED, will switch next)"
-                elif remaining <= 2:
-                    quota_note += f" — {remaining} left)"
-                else:
-                    quota_note += f" — {remaining} left)"
-
-                send(f"✅ *Email #{state['total_emailed']} Sent!*\n"
-                     f"App: {row.get('app_name','?')}\n"
-                     f"{etag} To: `{email}`\n"
-                     f"Via: {sender['email']} {quota_note}")
+                app_name_safe = str(row.get('app_name','?'))[:40]
+                send(f"✅ Email #{state['total_emailed']} sent\n"
+                     f"App: {app_name_safe}\n"
+                     f"{etag} To: {email}\n"
+                     f"Via: {sender['email']} ({quota_str})")
 
                 wait = random.randint(60, 120)
-                send(f"⏳ Waiting *{wait}s* before next...")
+                send(f"⏳ Waiting {wait}s before next...")
                 for _ in range(wait):
                     if state["status"] != "EMAILING": break
                     time.sleep(1)
+
             else:
-                send(f"❌ Failed to `{email}`: {resp}")
+                # Retry once on transient failure
+                send(f"⚠️ First attempt failed for {email}: {resp[:80]}\nRetrying in 10s...")
+                time.sleep(10)
+                try:
+                    r3   = requests.post(sender['url'],
+                             json={"action":"send_email","to":email,"subject":subject,"body":body_html},
+                             timeout=30)
+                    resp2 = r3.text.strip()
+                except Exception as re2:
+                    resp2 = f"Connection error: {re2}"
+
+                if resp2 == "Success":
+                    try:
+                        requests.post(SHEET_URL, json={"action":"increment_sender","email":sender['email']}, timeout=15)
+                        requests.post(SHEET_URL, json={"action":"mark_emailed","email":email}, timeout=15)
+                    except: pass
+                    state["total_emailed"] += 1
+                    send(f"✅ Email #{state['total_emailed']} sent (retry ok)\nTo: {email}")
+                else:
+                    send(f"❌ Skipping {email} — both attempts failed: {resp2[:60]}")
 
         if state["status"] == "EMAILING":
             send(f"🎉 *Email Phase Complete!* Total sent: *{state['total_emailed']}*")
@@ -911,7 +938,7 @@ Sent via Leadgen Bot | Sender: {sender_email}<br>
     try:
         r2   = requests.post(
             sender['url'],
-            json={{"action":"send_email","to":test_email,"subject":subject,"body":body}},
+            json={"action":"send_email","to":test_email,"subject":subject,"body":body},
             timeout=30
         )
         resp = r2.text.strip()
