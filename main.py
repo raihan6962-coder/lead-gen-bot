@@ -146,16 +146,54 @@ def get_next_keyword_set():
     return None, None
 
 # ════════════════════════════════════════════════════════════
-#  SCHEDULE MANAGEMENT
+#  SCHEDULE MANAGEMENT — FIXED
+#  getDisplayValues() in Code.gs ensures plain strings come back.
+#  This function also normalizes any edge-case formats just in case.
 # ════════════════════════════════════════════════════════════
 def get_schedule_times():
     try:
         r = requests.post(SHEET_URL, json={"action":"get_schedule_times"}, timeout=15)
-        if r.status_code == 200:
-            return r.json() if isinstance(r.json(), list) else []
+        if r.status_code != 200:
+            return []
+        raw = r.json()
+        if not isinstance(raw, list):
+            return []
+
+        cleaned = []
+        for item in raw:
+            t = str(item).strip()
+            # Case 1: "HH:MM" or "H:MM"
+            m = re.match(r'^(\d{1,2}):(\d{2})$', t)
+            if m:
+                cleaned.append(f"{int(m.group(1)):02d}:{m.group(2)}")
+                continue
+            # Case 2: "HH:MM:SS"
+            m = re.match(r'^(\d{1,2}):(\d{2}):\d{2}', t)
+            if m:
+                cleaned.append(f"{int(m.group(1)):02d}:{m.group(2)}")
+                continue
+            # Case 3: full date-time string
+            m = re.search(r'(\d{1,2}):(\d{2}):\d{2}', t)
+            if m:
+                cleaned.append(f"{int(m.group(1)):02d}:{m.group(2)}")
+                continue
+            # Case 4: float fraction of day
+            try:
+                fval = float(t)
+                if 0.0 <= fval < 1.0:
+                    total_min = round(fval * 24 * 60)
+                    h  = (total_min // 60) % 24
+                    mn = total_min % 60
+                    cleaned.append(f"{h:02d}:{mn:02d}")
+                    continue
+            except:
+                pass
+            print(f"[Scheduler] Could not parse time value: {repr(item)}")
+
+        return cleaned
     except Exception as e:
         print(f"get_schedule_times error: {e}")
-    return []
+        return []
 
 def add_schedule_time(time_str):
     try:
@@ -173,7 +211,6 @@ def delete_schedule_time(time_str):
 #  AI KEYWORD GENERATION (200 base keywords)
 # ════════════════════════════════════════════════════════════
 def fallback_keywords(base):
-    """Generate exactly 200 unique, realistic search keywords without random numbers."""
     templates = [
         "{base}", "best {base}", "top {base}", "new {base}", "{base} app",
         "{base} free", "{base} pro", "{base} lite", "{base} 2025", "popular {base}",
@@ -197,54 +234,26 @@ def fallback_keywords(base):
         "{base} settings", "{base} preferences", "{base} options",
         "{base} dark mode", "{base} light mode", "{base} theme",
         "{base} widget", "{base} shortcut", "{base} launcher",
-        "{base} icon pack", "{base} wallpaper", "{base} background",
-        "{base} notification", "{base} sound", "{base} ringtone",
-        "{base} alarm", "{base} timer", "{base} stopwatch",
-        "{base} calculator", "{base} converter", "{base} translator",
-        "{base} dictionary", "{base} thesaurus", "{base} encyclopedia",
-        "{base} game", "{base} quiz", "{base} puzzle", "{base} challenge",
-        "{base} multiplayer", "{base} single player", "{base} offline game",
-        "{base} online game", "{base} strategy", "{base} action",
-        "{base} adventure", "{base} role playing", "{base} simulation",
-        "{base} sports", "{base} racing", "{base} fighting",
-        "{base} card game", "{base} board game", "{base} word game",
-        "{base} trivia", "{base} knowledge", "{base} education",
-        "{base} learning", "{base} course", "{base} training",
-        "{base} certification", "{base} exam", "{base} test",
-        "{base} practice", "{base} flashcard",
-        "free {base}", "paid {base}", "cheap {base}", "expensive {base}",
-        "simple {base}", "easy {base}", "advanced {base}", "powerful {base}",
+        "free {base}", "paid {base}", "cheap {base}", "simple {base}",
+        "easy {base}", "advanced {base}", "powerful {base}",
         "fast {base}", "secure {base}", "reliable {base}", "trusted {base}",
         "official {base}", "original {base}", "genuine {base}",
-        "{base} by google", "{base} by microsoft", "{base} by amazon",
-        "google {base}", "microsoft {base}", "amazon {base}",
         "{base} for business", "{base} for personal", "{base} for work",
         "{base} for study", "{base} for kids", "{base} for adults",
-        "{base} with ads", "{base} no ads", "{base} ad free",
-        "{base} in english", "{base} in spanish", "{base} in hindi",
+        "{base} no ads", "{base} ad free", "{base} in english",
         "{base} 2024", "{base} 2023", "{base} old version",
-        "{base} previous version", "{base} classic", "{base} retro",
-        "get {base}", "install {base}", "use {base}", "try {base}",
-        "{base} demo", "{base} trial", "{base} sample", "{base} preview",
-        "{base} beta", "{base} alpha", "{base} stable",
-        "{base} community edition", "{base} professional",
+        "{base} classic", "{base} beta", "{base} stable",
         "{base} ultimate", "{base} premium", "{base} gold",
         "{base} plus", "{base} extra", "{base} max",
-        "{base} mini", "{base} micro", "{base} nano",
-        "smart {base}", "intelligent {base}", "ai {base}", "artificial intelligence {base}",
-        "machine learning {base}", "deep learning {base}", "neural {base}",
-        "blockchain {base}", "crypto {base}", "bitcoin {base}",
-        "cloud {base}", "web {base}", "mobile {base}",
-        "desktop {base}", "pc {base}", "mac {base}", "linux {base}",
-        "windows {base}", "ios {base}", "android {base}"
+        "{base} mini", "{base} micro", "smart {base}",
+        "ai {base}", "cloud {base}", "mobile {base}",
     ]
     result = []
     seen = set()
     i = 0
     while len(result) < 200:
         tmpl = templates[i % len(templates)]
-        keyword = tmpl.format(base=base)
-        keyword = re.sub(r'\s+', ' ', keyword).strip()
+        keyword = re.sub(r'\s+', ' ', tmpl.format(base=base)).strip()
         if 2 < len(keyword) < 60 and keyword not in seen:
             seen.add(keyword)
             result.append(keyword)
@@ -252,10 +261,9 @@ def fallback_keywords(base):
     return result[:200]
 
 def generate_keywords_from_base(base):
-    """Use Groq with the keyword prompt from settings. Fallback if fails."""
     settings = get_settings()
     kw_prompt = settings.get('keyword_prompt', 'Generate Play Store search terms for')
-    send(f"🧠 Generating 200 keywords from '{base}' using prompt: {kw_prompt[:50]}...")
+    send(f"🧠 Generating 200 keywords from '{base}'...")
     prompt = f"""{kw_prompt} "{base}"
 Return 200 unique, short search terms (2-5 words each) that people might type into Google Play Store.
 Comma separated list only. No numbers, no bullets, no explanations."""
@@ -287,133 +295,76 @@ Comma separated list only. No numbers, no bullets, no explanations."""
         return fallback
 
 # ════════════════════════════════════════════════════════════
-#  FALLBACK SEARCH VARIATIONS (comprehensive)
+#  SEARCH VARIATIONS — maximized for lead discovery
+#  Per keyword: 8 core variations × 5 countries = 40 searches = up to 20,000 app IDs
 # ════════════════════════════════════════════════════════════
-def get_fallback_search_variations(keyword):
-    """Return a comprehensive list of search variations for a keyword (80+)."""
-    templates = [
-        "{kw}", "best {kw}", "top {kw}", "new {kw}", "{kw} app",
-        "{kw} free", "{kw} pro", "{kw} lite", "{kw} 2025", "popular {kw}",
-        "{kw} for android", "{kw} download", "{kw} latest", "{kw} update",
-        "{kw} reviews", "{kw} problems", "{kw} complaints",
-        "apps like {kw}", "similar to {kw}", "{kw} alternative",
-        "best {kw} apps", "top rated {kw}", "{kw} version",
-        "{kw} online", "{kw} offline", "{kw} premium", "{kw} paid",
-        "{kw} rating", "{kw} store", "{kw} guide", "{kw} tutorial",
-        "{kw} help", "{kw} support", "{kw} community", "{kw} forum",
-        "top 10 {kw}", "best {kw} 2025", "new {kw} apps", "trending {kw}",
-        "{kw} for beginners", "{kw} expert", "{kw} pro version",
-        "{kw} tips", "{kw} tricks", "{kw} hacks", "{kw} secrets",
-        "{kw} features", "{kw} comparison", "{kw} vs", "{kw} alternatives",
-        "{kw} review", "{kw} ratings", "{kw} score", "{kw} installs",
-        "{kw} users", "{kw} feedback", "{kw} suggestions", "{kw} issues",
-        "{kw} bugs", "{kw} crash", "{kw} fix", "{kw} solution",
-        "{kw} workaround", "{kw} news", "{kw} blog", "{kw} official",
-        "{kw} website", "{kw} login", "{kw} signup", "{kw} account",
-        "{kw} profile", "{kw} settings", "{kw} preferences", "{kw} options",
-        "{kw} dark mode", "{kw} light mode", "{kw} theme", "{kw} widget",
-        "{kw} shortcut", "{kw} launcher", "{kw} icon pack", "{kw} wallpaper",
-        "{kw} background", "{kw} notification", "{kw} sound", "{kw} ringtone",
-        "{kw} alarm", "{kw} timer", "{kw} stopwatch", "{kw} calculator",
-        "{kw} converter", "{kw} translator", "{kw} dictionary", "{kw} thesaurus",
-        "{kw} encyclopedia", "{kw} game", "{kw} quiz", "{kw} puzzle",
-        "{kw} challenge", "{kw} multiplayer", "{kw} single player", "{kw} offline game",
-        "{kw} online game", "{kw} strategy", "{kw} action", "{kw} adventure",
-        "{kw} role playing", "{kw} simulation", "{kw} sports", "{kw} racing",
-        "{kw} fighting", "{kw} card game", "{kw} board game", "{kw} word game",
-        "{kw} trivia", "{kw} knowledge", "{kw} education", "{kw} learning",
-        "{kw} course", "{kw} training", "{kw} certification", "{kw} exam",
-        "{kw} test", "{kw} practice", "{kw} flashcard", "{kw} for ios",
-        "{kw} for iphone", "{kw} for ipad", "{kw} for mac", "{kw} for windows",
-        "{kw} for pc", "{kw} for desktop", "{kw} for laptop", "{kw} for tablet",
-        "{kw} for smartwatch", "{kw} for tv", "{kw} for android tv", "{kw} for fire tv",
-        "{kw} for chromecast", "{kw} for roku", "{kw} for apple tv",
-        "free {kw} apps", "paid {kw} apps", "cheap {kw} apps", "expensive {kw} apps",
-        "best free {kw}", "top free {kw}", "new free {kw}", "popular free {kw}",
-        "best paid {kw}", "top paid {kw}", "new paid {kw}", "popular paid {kw}",
-        "most downloaded {kw}", "most installed {kw}", "most rated {kw}",
-        "highest rated {kw}", "lowest rated {kw}", "most reviewed {kw}",
-        "latest {kw} apps", "updated {kw} apps", "recent {kw} apps"
-    ]
-    variations = [tmpl.format(kw=keyword) for tmpl in templates]
-    seen = set()
-    result = []
-    for v in variations:
-        v = re.sub(r'\s+', ' ', v).strip()
-        if 2 < len(v) < 60 and v not in seen:
-            seen.add(v)
-            result.append(v)
-    return result  # up to ~150
+SEARCH_VARIATIONS = [
+    "{kw}",
+    "best {kw}",
+    "{kw} free",
+    "{kw} app",
+    "top {kw}",
+    "new {kw}",
+    "{kw} pro",
+    "{kw} 2025",
+]
+
+COUNTRIES = ['us', 'in', 'gb', 'au', 'ca']
+
+def get_search_ids_for_keyword(kw):
+    """
+    For one keyword: run 8 variations × 5 countries = 40 searches.
+    n_hits=500 per search → up to 20,000 raw IDs (many duplicates expected).
+    Returns deduplicated list of NEW app IDs not yet in scraped_ids.
+    """
+    raw_ids = []
+    variations = [v.format(kw=kw) for v in SEARCH_VARIATIONS]
+
+    for q in variations:
+        for country in COUNTRIES:
+            try:
+                results = search(q, lang='en', country=country, n_hits=500)
+                for r in results:
+                    raw_ids.append(r['appId'])
+                time.sleep(random.uniform(0.3, 0.7))
+            except Exception as e:
+                print(f"Search error '{q}' [{country}]: {e}")
+                continue
+
+    # Deduplicate: keep only IDs not seen before
+    seen_this_kw = set()
+    new_ids = []
+    for i in raw_ids:
+        if i not in seen_this_kw and i not in state["scraped_ids"]:
+            seen_this_kw.add(i)
+            new_ids.append(i)
+
+    return new_ids
 
 # ════════════════════════════════════════════════════════════
-#  AI SEARCH VARIATION GENERATOR (with fallback)
-# ════════════════════════════════════════════════════════════
-def generate_search_variations(keyword, previous_yield=None):
-    """Use AI to create effective search phrases. Fallback if fails."""
-    if not state["ai_working"]:
-        return get_fallback_search_variations(keyword)
-
-    send(f"🧠 Generating smart search variations for '{keyword}'...")
-    context = ""
-    if previous_yield is not None:
-        context = f"Previous attempt with this keyword yielded only {previous_yield} apps. Please suggest more effective variations."
-    prompt = f"""{context}
-You are a Google Play Store search expert. Create 40 unique, realistic search phrases for the keyword "{keyword}" that will find many relevant Android apps.
-Each phrase should be 2-5 words, natural, and commonly used by users.
-Return as a comma-separated list. No numbers, no bullets, no explanations."""
-    try:
-        r = ai.chat.completions.create(
-            messages=[{"role":"user","content":prompt}],
-            model="llama-3.1-8b-instant",
-            max_tokens=1500
-        )
-        raw = r.choices[0].message.content.replace('\n',',').replace('\r',',')
-        variations = []
-        for v in raw.split(','):
-            v = re.sub(r'^\s+', '', v).strip()
-            if 2 < len(v) < 60 and v not in variations:
-                variations.append(v)
-        if len(variations) < 10:
-            variations = get_fallback_search_variations(keyword)
-        send(f"✅ Generated {len(variations)} search variations.")
-        return variations[:60]
-    except Exception as e:
-        send(f"❌ Variation generation failed. Using fallback.")
-        state["ai_working"] = False
-        return get_fallback_search_variations(keyword)
-
-# ════════════════════════════════════════════════════════════
-#  FILTER A SINGLE APP (with detailed stats)
+#  FILTER
 # ════════════════════════════════════════════════════════════
 def is_qualified(app_dict, max_rating, max_installs, seen_emails, stats):
-    dev = str(app_dict.get('dev_name','') or '').lower()
-    rating = float(app_dict.get('rating') or 0.0)
+    dev      = str(app_dict.get('dev_name','') or '').lower()
+    rating   = float(app_dict.get('rating') or 0.0)
     installs = int(app_dict.get('installs') or 0)
-    email = str(app_dict.get('email','') or '').strip().lower()
+    email    = str(app_dict.get('email','') or '').strip().lower()
 
     if any(g in dev for g in GOV):
-        stats["gov"] += 1
-        return False, "gov"
+        stats["gov"] += 1;        return False, "gov"
     if rating == 0.0:
-        stats["zero_rating"] += 1
-        return False, "zero_rating"
+        stats["zero_rating"] += 1; return False, "zero_rating"
     if rating > max_rating:
-        stats["rating"] += 1
-        return False, "rating"
+        stats["rating"] += 1;      return False, "rating"
     if installs > max_installs:
-        stats["installs"] += 1
-        return False, "installs"
+        stats["installs"] += 1;    return False, "installs"
     if not email or '@' not in email:
-        stats["no_email"] += 1
-        return False, "no_email"
+        stats["no_email"] += 1;    return False, "no_email"
     if email in seen_emails:
-        stats["dup"] += 1
-        return False, "dup"
+        stats["dup"] += 1;         return False, "dup"
+    stats["passed"] += 1
     return True, "passed"
 
-# ════════════════════════════════════════════════════════════
-#  SAVE A SINGLE QUALIFIED LEAD
-# ════════════════════════════════════════════════════════════
 def save_qualified_lead(row):
     try:
         requests.post(SHEET_URL,
@@ -425,7 +376,7 @@ def save_qualified_lead(row):
         return False
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 1 — SCRAPE (aggressive, with detailed filtering)
+#  PHASE 1 — SCRAPE
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -438,7 +389,6 @@ def phase1_scrape():
 
     try:
         settings = get_settings()
-        # Default to more permissive values if not set in sheet
         max_installs = int(str(settings.get('max_installs','500000')).replace(',','').strip())
         max_rating   = float(str(settings.get('max_rating','4.8')).strip())
 
@@ -478,49 +428,25 @@ def phase1_scrape():
 
         send(f"✅ Already in DB: *{len(state['scraped_ids'])}* apps\n"
              f"Already qualified emails: *{len(state['seen_emails'])}*\n"
-             f"Starting scrape with {len(generated)} keywords.")
-
-        # Countries to search (expanded)
-        countries = ['us', 'in', 'gb', 'ca', 'au']  # USA, India, UK, Canada, Australia
+             f"Starting scrape with *{len(generated)}* keywords.\n"
+             f"Filter: rating ≤ {max_rating}, installs ≤ {max_installs:,}")
 
         while state["kw_index"] < len(state["generated_kws"]):
             while state["status"] == "PAUSED": time.sleep(1)
-            if state["status"] == "IDLE":  # Stop pressed
+            if state["status"] == "IDLE":
                 return
 
             kw = state["generated_kws"][state["kw_index"]]
             send(f"🔍 *KW {state['kw_index']+1}/{len(state['generated_kws'])}:* `{kw}`")
 
-            # Use fallback variations directly for maximum coverage
-            variations = get_fallback_search_variations(kw)
-            # Optionally, try AI if working
-            if state["ai_working"] and state["kw_index"] % 3 == 0:
-                variations = generate_search_variations(kw)
-
-            raw_ids = []
-            for q in variations:
-                for country in countries:
-                    try:
-                        results = search(q, lang='en', country=country, n_hits=500)
-                        for r in results: raw_ids.append(r['appId'])
-                        time.sleep(random.uniform(0.5, 1.0))
-                    except Exception as e:
-                        print(f"Search error for '{q}' in {country}: {e}")
-                        continue
-
-            seen_kw, ids = set(), []
-            for i in raw_ids:
-                if i not in seen_kw and i not in state["scraped_ids"]:
-                    seen_kw.add(i)
-                    ids.append(i)
-
+            # 8 variations × 5 countries — maximized search
+            ids = get_search_ids_for_keyword(kw)
             send(f"📦 *{len(ids)}* new apps to fetch for `{kw}`")
 
             kw_count = 0
             batch_raw = []
             qualified_from_kw = 0
-            # Detailed filter stats for this keyword
-            filter_stats = {"gov":0, "zero_rating":0, "rating":0, "installs":0, "no_email":0, "dup":0, "passed":0}
+            filter_stats = {"gov":0,"zero_rating":0,"rating":0,"installs":0,"no_email":0,"dup":0,"passed":0}
 
             for app_id in ids:
                 while state["status"] == "PAUSED": time.sleep(1)
@@ -537,31 +463,22 @@ def phase1_scrape():
                 rating      = float(d.get('score') or 0.0)
                 raw_inst    = d.get('minInstalls') or d.get('realInstalls') or 0
                 installs    = int(raw_inst) if raw_inst else 0
-                dev         = str(d.get('developer','') or '')
-                title       = str(d.get('title','Unknown'))
-                description = str(d.get('description','') or '')[:1000]
-                summary     = str(d.get('summary','') or '')
-                genre       = str(d.get('genre','') or '')
-                website     = str(d.get('developerWebsite','') or '')
-                updated     = str(d.get('updated','') or '')
-                url         = str(d.get('url','') or '')
-                privacy     = str(d.get('privacyPolicy','') or '')
 
                 app_dict = {
                     "app_id":      app_id,
-                    "app_name":    title,
-                    "dev_name":    dev,
+                    "app_name":    str(d.get('title','Unknown')),
+                    "dev_name":    str(d.get('developer','') or ''),
                     "email":       email,
                     "email_source":esrc,
                     "rating":      rating,
                     "installs":    installs,
-                    "genre":       genre,
-                    "summary":     summary,
-                    "description": description,
-                    "website":     website,
-                    "privacy":     privacy,
-                    "link":        url,
-                    "updated":     updated,
+                    "genre":       str(d.get('genre','') or ''),
+                    "summary":     str(d.get('summary','') or ''),
+                    "description": str(d.get('description','') or '')[:1000],
+                    "website":     str(d.get('developerWebsite','') or ''),
+                    "privacy":     str(d.get('privacyPolicy','') or ''),
+                    "link":        str(d.get('url','') or ''),
+                    "updated":     str(d.get('updated','') or ''),
                     "keyword":     kw
                 }
 
@@ -587,7 +504,7 @@ def phase1_scrape():
                     except Exception as e:
                         print(f"Batch save error: {e}")
 
-                time.sleep(random.uniform(0.1, 0.3))
+                time.sleep(random.uniform(0.05, 0.15))
 
             if batch_raw:
                 try:
@@ -596,16 +513,13 @@ def phase1_scrape():
                         timeout=30)
                 except: pass
 
-            # Show filter stats for this keyword
-            filter_summary = (f"Filter stats: Gov {filter_stats['gov']}, Zero rating {filter_stats['zero_rating']}, "
-                              f"Rating >{max_rating} {filter_stats['rating']}, Installs >{max_installs} {filter_stats['installs']}, "
-                              f"No email {filter_stats['no_email']}, Duplicate {filter_stats['dup']}, Passed {filter_stats['passed']}")
-            send(filter_summary)
+            send(f"✅ KW `{kw}` done — {kw_count} apps, {qualified_from_kw} qualified\n"
+                 f"📊 Gov:{filter_stats['gov']} ZeroRating:{filter_stats['zero_rating']} "
+                 f"Rating:{filter_stats['rating']} Installs:{filter_stats['installs']} "
+                 f"NoEmail:{filter_stats['no_email']} Dup:{filter_stats['dup']} ✅Passed:{filter_stats['passed']}\n"
+                 f"Total scraped: *{state['total_scraped']}*, Total qualified: *{state['qualified_count']}*")
 
             state["kw_stats"][kw] = {"apps": kw_count, "qualified": qualified_from_kw}
-            send(f"✅ KW `{kw}` done — {kw_count} apps scraped, {qualified_from_kw} qualified\n"
-                 f"Total scraped: *{state['total_scraped']}*, Total qualified so far: *{state['qualified_count']}*")
-
             state["kw_index"] += 1
 
         if state["status"] != "IDLE" and state["current_set_id"]:
@@ -620,7 +534,7 @@ def phase1_scrape():
                 threading.Thread(target=phase2_email_only, daemon=True).start()
                 return
             elif state["qualified_count"] == 0:
-                send("⚠️ No qualified leads found. Add more keywords or adjust filters.")
+                send("⚠️ No qualified leads found. Try adjusting filters in Settings sheet.")
                 state["status"] = "IDLE"
                 bot.send_message(cid, ".", reply_markup=kb())
 
@@ -634,7 +548,7 @@ def phase1_scrape():
         bot.send_message(cid, ".", reply_markup=kb())
 
 # ════════════════════════════════════════════════════════════
-#  PHASE 2 — EMAIL (automatic sender switching)
+#  PHASE 2 — EMAIL
 # ════════════════════════════════════════════════════════════
 def phase2_email_only():
     cid = state["chat_id"]
@@ -682,15 +596,15 @@ def phase2_email_only():
                 break
 
             sender = available[0]
-            email = str(row.get('email',''))
-            esrc = str(row.get('email_source','dev'))
+            email  = str(row.get('email',''))
+            esrc   = str(row.get('email_source','dev'))
 
             subject, body_html = build_clean_email(row, sender['email'], email_prompt)
 
             try:
-                r2 = requests.post(sender['url'],
-                     json={"action":"send_email","to":email,"subject":subject,"body":body_html},
-                     timeout=30)
+                r2   = requests.post(sender['url'],
+                         json={"action":"send_email","to":email,"subject":subject,"body":body_html},
+                         timeout=30)
                 resp = r2.text.strip()
             except Exception as se:
                 resp = f"Connection error: {se}"
@@ -743,7 +657,7 @@ def get_pending_qualified_leads():
         pass
     return []
 
-# ─── CLEAN EMAIL BUILDER (uses email prompt) ─────────────────
+# ─── EMAIL BUILDER ────────────────────────────────────────────
 def build_clean_email(row, sender_email, email_prompt):
     app_name    = str(row.get('app_name','Unknown App'))
     dev_name    = str(row.get('dev_name','') or '').strip()
@@ -827,14 +741,14 @@ BODY: [email starting with Dear {dev_name},]"""
         content = r.choices[0].message.content.strip()
 
         if "SUBJECT:" in content and "BODY:" in content:
-            subject = content.split("SUBJECT:")[1].split("BODY:")[0].strip()
+            subject  = content.split("SUBJECT:")[1].split("BODY:")[0].strip()
             raw_body = content.split("BODY:")[1].strip()
         else:
-            lines = content.split('\n')
-            subject = lines[0].replace("Subject:","").replace("SUBJECT:","").strip()
+            lines    = content.split('\n')
+            subject  = lines[0].replace("Subject:","").replace("SUBJECT:","").strip()
             raw_body = '\n'.join(lines[1:]).strip()
 
-        body = raw_body.replace('**','').replace('*','')
+        body      = raw_body.replace('**','').replace('*','')
         body_html = body.replace('\n\n','<br><br>').replace('\n','<br>')
         unsubscribe = f'<br><br><hr style="border:0;border-top:1px solid #eee;margin:16px 0;"><p style="text-align:center;font-size:11px;color:#bbb;"><a href="mailto:{sender_email}?subject=Unsubscribe&body=Remove me." style="color:#bbb;">Unsubscribe</a></p>'
         full_html = f"""<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;color:#333;max-width:600px;margin:0 auto;">
@@ -850,14 +764,14 @@ Abu Raihan<br>
 Play Store Review Service Specialist<br><br>
 WhatsApp: +8801902911261<br>
 Telegram: https://t.me/abu_raihan69"""
-        subject = f"Quick question about {app_name}"
+        subject     = f"Quick question about {app_name}"
         unsubscribe = f'<br><br><hr style="border:0;border-top:1px solid #eee;margin:16px 0;"><p style="text-align:center;font-size:11px;color:#bbb;"><a href="mailto:{sender_email}?subject=Unsubscribe&body=Remove me." style="color:#bbb;">Unsubscribe</a></p>'
-        full_html = f"<div>{fallback}{unsubscribe}</div>"
+        full_html   = f"<div>{fallback}{unsubscribe}</div>"
         return subject, full_html
 
-# ─── SPAM TEST with sender selection ────────────────────────
+# ─── SPAM TEST ────────────────────────────────────────────────
 def run_spam_test_with_sender(test_email, sender):
-    settings = get_settings()
+    settings     = get_settings()
     email_prompt = settings.get('email_prompt', 'Write a professional outreach email.')
     fake_row = {
         "app_name":"Demo Budget Tracker",
@@ -870,9 +784,9 @@ def run_spam_test_with_sender(test_email, sender):
     }
     subject, body = build_clean_email(fake_row, sender['email'], email_prompt)
     try:
-        r2 = requests.post(sender['url'],
-             json={"action":"send_email","to":test_email,"subject":subject,"body":body},
-             timeout=30)
+        r2   = requests.post(sender['url'],
+                 json={"action":"send_email","to":test_email,"subject":subject,"body":body},
+                 timeout=30)
         resp = r2.text.strip()
         if resp == "Success":
             send(f"✅ Test sent to `{test_email}` via {sender['email']}")
@@ -900,11 +814,14 @@ def show_sender_selection(test_email):
         state["status"] = "IDLE"
         bot.send_message(state["chat_id"], ".", reply_markup=kb())
 
-# ─── SCHEDULER ───────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+#  SCHEDULER — FIXED
+#  triggered_today prevents double-trigger within same minute
+# ════════════════════════════════════════════════════════════
 def run_scheduler():
     tz = pytz.timezone('Asia/Dhaka')
     print("⏰ Scheduler thread started.")
-    triggered_today = {}
+    triggered_today = {}  # {"HH:MM": "YYYY-MM-DD"}
 
     while True:
         try:
@@ -920,6 +837,7 @@ def run_scheduler():
                     if t == now_hm and triggered_today.get(t) != today:
                         triggered_today[t] = today
                         send(f"⏰ Scheduled time *{t}* — starting automation...")
+                        bot.send_message(state["chat_id"], ".", reply_markup=kb())
                         threading.Thread(target=phase1_scrape, daemon=True).start()
                         break
 
@@ -928,9 +846,9 @@ def run_scheduler():
 
         time.sleep(10)
 
-# ─── REFRESH COMMAND ─────────────────────────────────────────
+# ─── REFRESH ─────────────────────────────────────────────────
 def refresh_status():
-    sets = get_keyword_sets()
+    sets    = get_keyword_sets()
     pending = [s for s in sets if s.get('status') == 'pending']
     send(f"🔄 *Refresh*\n"
          f"Status: {state['status']}\n"
@@ -941,8 +859,8 @@ def refresh_status():
 # ─── BOT HANDLERS ────────────────────────────────────────────
 @bot.message_handler(commands=['start'])
 def welcome(message):
-    state["chat_id"] = message.chat.id
-    state["status"]  = "IDLE"
+    state["chat_id"]  = message.chat.id
+    state["status"]   = "IDLE"
     state["settings"] = {}
     bot.reply_to(message,
         "👋 *Welcome Boss!*\n\n"
@@ -1022,14 +940,14 @@ def callbacks(call):
         bot.send_message(cid, "Test cancelled.", reply_markup=kb())
     elif d.startswith("testsend_"):
         sender_email = d.split("testsend_")[1]
-        test_email = state.get("tmp_test_email")
+        test_email   = state.get("tmp_test_email")
         if not test_email:
             bot.send_message(cid, "❌ No test email in memory. Start over.")
             state["status"] = "IDLE"
             return
         try:
             senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
-            sender = next((s for s in senders if s['email'] == sender_email), None)
+            sender  = next((s for s in senders if s['email'] == sender_email), None)
             if not sender:
                 bot.send_message(cid, "❌ Sender not found.")
                 state["status"] = "IDLE"
@@ -1049,9 +967,9 @@ def handle(message):
     state["chat_id"] = message.chat.id
 
     if text == "🔙 Back":
-        state["status"]    = "IDLE"
-        state["tmp_url"]   = None
-        state["tmp_email"] = None
+        state["status"]         = "IDLE"
+        state["tmp_url"]        = None
+        state["tmp_email"]      = None
         state["tmp_test_email"] = None
         bot.reply_to(message,"🔙 Main Menu.", reply_markup=kb())
         return
@@ -1145,25 +1063,19 @@ def handle(message):
 
     elif text == "⏹️ Stop":
         if state["status"] in ["SCRAPING","FILTERING","EMAILING","PAUSED"]:
-            state["status"] = "IDLE"
+            state["status"]        = "IDLE"
             state["generated_kws"] = []
-            state["kw_index"] = 0
-            state["current_set_id"] = None
-            state["qualified_count"] = 0
+            state["kw_index"]      = 0
+            state["current_set_id"]= None
+            state["qualified_count"]= 0
             bot.reply_to(message,"⏹️ *Stopped.* Current keyword set remains pending.", reply_markup=kb())
 
     elif text == "⏹️ Reset":
         state.update({
-            "status":"IDLE",
-            "generated_kws":[],
-            "kw_index":0,
-            "scraped_ids":set(),
-            "total_scraped":0,
-            "total_emailed":0,
-            "current_set_id": None,
-            "qualified_count":0,
-            "seen_emails":set(),
-            "settings":{}
+            "status":"IDLE","generated_kws":[],"kw_index":0,
+            "scraped_ids":set(),"total_scraped":0,"total_emailed":0,
+            "current_set_id":None,"qualified_count":0,
+            "seen_emails":set(),"settings":{}
         })
         bot.reply_to(message,"⏹️ *Fully reset.*", reply_markup=kb())
 
@@ -1172,7 +1084,7 @@ def handle(message):
 
     elif text == "📅 Schedules":
         times = get_schedule_times()
-        mk = InlineKeyboardMarkup()
+        mk  = InlineKeyboardMarkup()
         txt = "📋 *Scheduled times (Dhaka):*\n\n"
         if not times:
             txt += "_None set._\n"
@@ -1186,7 +1098,7 @@ def handle(message):
 
     elif text == "🔑 Keywords":
         sets = get_keyword_sets()
-        mk = InlineKeyboardMarkup()
+        mk  = InlineKeyboardMarkup()
         txt = "🔑 *Keyword sets:*\n\n"
         if not sets:
             txt += "_None added._\n"
