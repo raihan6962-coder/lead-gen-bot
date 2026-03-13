@@ -233,66 +233,126 @@ def delete_schedule_time(time_str):
 
 # ════════════════════════════════════════════════════════════
 #  FALLBACK KEYWORD GENERATOR — guaranteed 200 unique
+#  Uses domain-specific terms, NOT generic prefix/suffix combos
 # ════════════════════════════════════════════════════════════
 def fallback_keywords(base):
-    prefixes = [
-        "best","top","new","popular","free","paid","pro","lite","simple",
-        "easy","fast","smart","advanced","trending","official","trusted",
-        "secure","reliable","cheap","premium","ultimate","ai","cloud","mobile",
-    ]
-    suffixes = [
-        "app","free","pro","lite","2025","2024","online","offline","android",
-        "download","latest","update","review","tutorial","guide","help","tips",
-        "tricks","for beginners","expert","alternative","comparison","version",
-        "beta","plus","max","mini","classic","gold","premium","no ads","ad free",
-        "for android","for kids","for business","mobile","cloud","tool",
+    # These are actual Play Store search patterns that return real apps
+    patterns = [
+        base,
+        f"{base} app", f"{base} free", f"{base} pro",
+        f"best {base}", f"top {base} app", f"free {base} app",
+        f"{base} for android", f"{base} 2025", f"{base} no ads",
+        f"{base} offline", f"simple {base}", f"easy {base}",
+        f"{base} tracker", f"{base} manager", f"{base} tool",
+        f"{base} planner", f"{base} organizer", f"{base} reminder",
+        f"{base} calculator", f"{base} converter", f"{base} scanner",
+        f"my {base}", f"smart {base}", f"fast {base}",
+        f"{base} lite", f"{base} plus", f"{base} premium",
+        f"top {base}", f"new {base} app", f"popular {base}",
+        f"{base} daily", f"{base} helper", f"{base} assistant",
+        f"{base} widget", f"{base} shortcut", f"quick {base}",
+        f"{base} for free", f"best free {base}", f"top free {base}",
+        f"{base} without internet", f"{base} no login",
+        f"{base} small size", f"lightweight {base}",
+        f"{base} budget", f"{base} expense", f"{base} finance",
+        f"{base} health", f"{base} fitness", f"{base} workout",
+        f"{base} education", f"{base} learning", f"{base} study",
+        f"{base} games", f"{base} entertainment", f"{base} music",
+        f"{base} photo", f"{base} video", f"{base} camera",
+        f"{base} shopping", f"{base} delivery", f"{base} food",
+        f"{base} travel", f"{base} maps", f"{base} navigation",
+        f"{base} social", f"{base} chat", f"{base} messenger",
+        f"{base} business", f"{base} office", f"{base} work",
+        f"{base} student", f"{base} kids", f"{base} family",
+        f"{base} android", f"{base} mobile", f"{base} phone",
+        f"top rated {base}", f"highly rated {base}", f"best rated {base}",
+        f"{base} 4 stars", f"good {base} app", f"reliable {base}",
+        f"{base} alternative", f"apps like {base}", f"similar to {base}",
+        f"{base} competitor", f"better {base}", f"replace {base}",
+        f"free alternative to {base}", f"{base} open source",
+        f"{base} india", f"{base} usa", f"{base} uk",
+        f"{base} bengali", f"{base} hindi", f"{base} arabic",
+        f"{base} english", f"{base} multilingual",
+        f"new {base}", f"latest {base}", f"updated {base}",
+        f"{base} 2024", f"{base} update", f"{base} version",
+        f"{base} beta", f"download {base}",
+        f"how to use {base}", f"{base} guide", f"{base} tutorial",
+        f"{base} tips", f"{base} tricks", f"{base} hack",
+        f"{base} review", f"{base} rating", f"{base} feedback",
+        f"install {base}", f"get {base} app", f"use {base} free",
     ]
     result, seen = [], set()
-    result.append(base); seen.add(base)
-    for p in prefixes:
-        kw = f"{p} {base}"
-        if kw not in seen: seen.add(kw); result.append(kw)
-    for s in suffixes:
-        kw = f"{base} {s}"
-        if kw not in seen: seen.add(kw); result.append(kw)
-    for p in prefixes:
-        for s in suffixes:
-            if len(result) >= 200: break
-            kw = f"{p} {base} {s}"
-            if kw not in seen: seen.add(kw); result.append(kw)
+    for kw in patterns:
+        kw = re.sub(r'\s+', ' ', kw).strip()
+        if 2 < len(kw) < 60 and kw not in seen:
+            seen.add(kw); result.append(kw)
         if len(result) >= 200: break
+    # If still under 200, fill with more combos
+    extra_words = ["online","offline","simple","basic","advanced","smart",
+                   "quick","daily","weekly","monthly","personal","professional"]
+    for w in extra_words:
+        for kw in [f"{base} {w}", f"{w} {base} app"]:
+            if len(result) >= 200: break
+            kw = kw.strip()
+            if kw not in seen: seen.add(kw); result.append(kw)
     return result[:200]
 
 # ════════════════════════════════════════════════════════════
 #  AI KEYWORD GENERATION
+#  Strategy: AI generates the actual search queries people use
+#  on Play Store — NOT generic prefix/suffix combos
 # ════════════════════════════════════════════════════════════
 def generate_keywords_from_base(base):
     settings  = get_settings()
-    kw_prompt = settings.get('keyword_prompt','Generate Google Play Store search terms for')
-    send(f"🧠 AI generating 200 keywords for '{base}'...")
+    kw_prompt = settings.get('keyword_prompt','')
+    send(f"🧠 AI generating smart keywords for '{base}'...")
 
-    prompt = f"""{kw_prompt} "{base}"
+    prompt = f"""You are an expert at Google Play Store app discovery and search optimization.
 
-Generate 200 unique realistic search terms that users actually type into Google Play Store to find apps related to "{base}".
+Task: Generate 200 unique search queries for the niche: "{base}"
 
-Requirements:
-- Mix short (1-2 words) and medium (3-5 words) terms
-- Include: free, pro, best, top, alternative, 2025, for android, no ads, etc.
-- Include related niches, use cases, and problem-solving terms
-- Comma separated list ONLY
-- No numbers, no bullets, no explanations, no markdown"""
+These must be ACTUAL search terms real users type into Google Play Store search bar.
+Think about:
+- What problems does someone in this niche want to solve?
+- What are the sub-niches, related categories, specific use cases?
+- What are the actual app names or brand terms people search for?
+- What are common issues/pain points users search solutions for?
 
-    result = call_ai(prompt, max_tokens=2500)
+For example, if niche is "online earning":
+→ Don't write: "best online earning", "online earning pro", "online earning app"
+→ DO write: "earn money from home", "freelance jobs app", "get paid to take surveys", "passive income ideas", "sell photos for money", "gig work finder", "micro task earning", "data entry jobs mobile"
+
+For niche "{base}", generate 200 such SPECIFIC, REALISTIC, DIVERSE search queries.
+{f"Additional context: {kw_prompt}" if kw_prompt else ""}
+
+Output rules:
+- Comma separated ONLY
+- No numbering, no bullets, no explanations
+- Each query must be 2-6 words
+- Must be highly diverse — cover all angles of this niche"""
+
+    result = call_ai(prompt, max_tokens=3000)
     if result:
         terms = []
-        for t in result.replace('\n',',').split(','):
-            t = re.sub(r'^\d+[\.\)\-\s]+','', t)
+        raw = result.replace('\n', ',').replace('\r', ',')
+        for t in raw.split(','):
+            t = re.sub(r'^\d+[\.\)\-\s]+', '', t)
             t = t.replace('**','').replace('*','').replace('#','').strip()
-            if 2 < len(t) < 60 and t not in terms:
+            # Remove obvious generic variations that don't work well
+            skip = False
+            for bad in [' pro', ' lite', ' free download', ' apk']:
+                if t.lower().endswith(bad): skip = True; break
+            if not skip and 4 < len(t) < 65 and t not in terms:
                 terms.append(t)
-        if len(terms) >= 20:
-            send(f"✅ AI generated {len(terms)} keywords.")
+        if len(terms) >= 30:
+            send(f"✅ AI generated {len(terms)} smart keywords.")
             return terms[:200]
+        elif len(terms) >= 10:
+            # Supplement with fallback
+            fb = fallback_keywords(base)
+            combined = terms + [x for x in fb if x not in terms]
+            send(f"✅ AI+Fallback: {len(combined[:200])} keywords.")
+            return combined[:200]
 
     send("⚠️ AI generation failed. Using smart fallback...")
     fb = fallback_keywords(base)
@@ -300,27 +360,74 @@ Requirements:
     return fb
 
 # ════════════════════════════════════════════════════════════
-#  SEARCH — 8 variations × 5 countries = 40 searches per keyword
+#  SEARCH — smart per-keyword query (no generic templates)
+#  Rate limit protection: exponential backoff + cooldown tracking
 # ════════════════════════════════════════════════════════════
-SEARCH_TEMPLATES = [
-    "{kw}", "best {kw}", "{kw} free", "{kw} app",
-    "top {kw}", "new {kw}", "{kw} pro", "{kw} 2025",
-]
 COUNTRIES = ['us','in','gb','au','ca']
+_consecutive_empty = 0   # track how many searches returned 0 results in a row
+
+def play_search_safe(query, country, n_hits=200):
+    """Single Play Store search with retry on rate-limit."""
+    global _consecutive_empty
+    for attempt in range(3):
+        try:
+            results = search(query, lang='en', country=country, n_hits=n_hits)
+            if results:
+                _consecutive_empty = 0
+            return results
+        except Exception as e:
+            err = str(e).lower()
+            if '429' in err or 'too many' in err or 'rate' in err:
+                wait = 30 * (attempt + 1)
+                print(f"[Search] Rate limit on '{query}' [{country}] — waiting {wait}s")
+                send(f"⏸️ Play Store rate limit — waiting {wait}s...")
+                time.sleep(wait)
+                continue
+            else:
+                print(f"[Search] Error '{query}' [{country}]: {e}")
+                return []
+    return []
 
 def get_search_ids_for_keyword(kw):
+    """
+    Search strategy:
+    - Use the keyword as-is (it's already a meaningful phrase from AI)
+    - Try 3 countries: us, in, gb
+    - If keyword is short (≤ 2 words), also try 2 variations
+    - Rate limit protection built-in
+    """
+    global _consecutive_empty
+
+    # If too many consecutive empty results → take a longer break
+    if _consecutive_empty >= 5:
+        send(f"⏸️ Too many empty results in a row — cooling down 60s to avoid ban...")
+        time.sleep(60)
+        _consecutive_empty = 0
+
     raw_ids = []
-    for tmpl in SEARCH_TEMPLATES:
-        q = tmpl.format(kw=kw)
-        for country in COUNTRIES:
-            try:
-                results = search(q, lang='en', country=country, n_hits=500)
-                for r in results:
-                    raw_ids.append(r['appId'])
-                time.sleep(random.uniform(0.3, 0.6))
-            except Exception as e:
-                print(f"Search error '{q}' [{country}]: {e}")
-                continue
+    queries = [kw]
+
+    # For short keywords, add ONE variation that opens more results
+    words = kw.split()
+    if len(words) <= 2:
+        queries.append(f"{kw} app")
+        queries.append(f"best {kw}")
+
+    search_countries = ['us', 'in', 'gb']   # 3 countries is enough per keyword
+
+    for q in queries:
+        for country in search_countries:
+            results = play_search_safe(q, country, n_hits=250)
+            for r in results:
+                raw_ids.append(r['appId'])
+            time.sleep(random.uniform(1.0, 2.0))   # respectful delay between searches
+
+    if not raw_ids:
+        _consecutive_empty += 1
+    else:
+        _consecutive_empty = 0
+
+    # Deduplicate and exclude already-seen
     seen_kw, new_ids = set(), []
     for i in raw_ids:
         if i not in seen_kw and i not in state["scraped_ids"]:
@@ -555,22 +662,30 @@ def phase2_email_only():
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE": break
 
+            # ── Sender selection with auto-rotation ──
+            sender = None
             try:
-                senders   = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
-                available = [s for s in senders if int(s.get('sent',0)) < int(s.get('limit',1))]
+                senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
+                # Pick first sender that still has quota remaining
+                for s in senders:
+                    if int(s.get('sent', 0)) < int(s.get('limit', 1)):
+                        sender = s
+                        break
             except Exception as e:
                 print(f"Error fetching senders: {e}")
                 time.sleep(3); continue
 
-            if not available:
-                info = "⚠️ All senders hit daily limit!\n"
-                for s in senders:
-                    info += f"  {s['email']}: {s.get('sent',0)}/{s.get('limit',0)}\n"
+            if not sender:
+                # All senders exhausted — show status and pause
+                info = "⚠️ *All senders hit daily limit!*\n\n"
+                try:
+                    for s in senders:
+                        info += f"📧 {s['email']}: {s.get('sent',0)}/{s.get('limit',0)} sent\n"
+                except: pass
+                info += "\nResume tomorrow after limits reset."
                 send(info)
                 state["status"] = "PAUSED"
                 bot.send_message(cid, ".", reply_markup=kb()); break
-
-            sender = available[0]
             email  = str(row.get('email',''))
             esrc   = str(row.get('email_source','dev'))
 
@@ -593,10 +708,23 @@ def phase2_email_only():
 
                 state["total_emailed"] += 1
                 etag = {"dev":"📧","support":"📩","extracted":"📬"}.get(esrc,"📬")
+
+                # Check remaining quota for this sender
+                sent_now = int(sender.get('sent', 0)) + 1
+                limit    = int(sender.get('limit', 1))
+                remaining = limit - sent_now
+                quota_note = f"(quota: {sent_now}/{limit}"
+                if remaining <= 0:
+                    quota_note += " — LIMIT REACHED, will switch next)"
+                elif remaining <= 2:
+                    quota_note += f" — {remaining} left)"
+                else:
+                    quota_note += f" — {remaining} left)"
+
                 send(f"✅ *Email #{state['total_emailed']} Sent!*\n"
                      f"App: {row.get('app_name','?')}\n"
                      f"{etag} To: `{email}`\n"
-                     f"Via: {sender['email']}")
+                     f"Via: {sender['email']} {quota_note}")
 
                 wait = random.randint(60, 120)
                 send(f"⏳ Waiting *{wait}s* before next...")
@@ -1147,4 +1275,3 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Poll error: {e}")
             time.sleep(5)
-
