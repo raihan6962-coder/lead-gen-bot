@@ -299,90 +299,104 @@ def fallback_keywords(base):
 
 # ════════════════════════════════════════════════════════════
 #  AI KEYWORD GENERATION
-#  Strategy: AI generates the actual search queries people use
-#  on Play Store — NOT generic prefix/suffix combos
+#  STRICT: Only keywords that return real apps on Play Store.
+#  No obscure coins/brands that give 0 results.
 # ════════════════════════════════════════════════════════════
+def parse_ai_keywords(raw_text):
+    """Parse AI output into clean keyword list."""
+    terms = []
+    for t in raw_text.replace('\n', ',').replace('\r', ',').split(','):
+        t = re.sub(r'^\d+[\.)\-\s]+', '', t).replace('**','').replace('*','').replace('#','').strip('" \' ')
+        if 3 < len(t) < 60 and t not in terms:
+            terms.append(t)
+    return terms
+
 def generate_keywords_from_base(base):
+    """
+    Generates 200 BROAD keywords that actually return apps on Play Store.
+    Key rule: NO obscure brand/coin names. Focus on category-level terms.
+    Uses two AI passes for diversity, then fills with fallback if needed.
+    """
     settings  = get_settings()
-    kw_prompt = settings.get('keyword_prompt','')
-    send(f"🧠 AI generating smart keywords for '{base}'...")
+    kw_prompt = settings.get('keyword_prompt', '')
+    send(f"🧠 Generating keywords for '{base}'...")
 
-    prompt = f"""You are an expert at Google Play Store app discovery and search optimization.
-
-Task: Generate 200 unique search queries for the niche: "{base}"
-
-These must be ACTUAL search terms real users type into Google Play Store search bar.
-Think about:
-- What problems does someone in this niche want to solve?
-- What are the sub-niches, related categories, specific use cases?
-- What are the actual app names or brand terms people search for?
-- What are common issues/pain points users search solutions for?
-
-For example, if niche is "online earning":
-→ Don't write: "best online earning", "online earning pro", "online earning app"
-→ DO write: "earn money from home", "freelance jobs app", "get paid to take surveys", "passive income ideas", "sell photos for money", "gig work finder", "micro task earning", "data entry jobs mobile"
-
-For niche "{base}", generate 200 such SPECIFIC, REALISTIC, DIVERSE search queries.
-{f"Additional context: {kw_prompt}" if kw_prompt else ""}
-
-Output rules:
-- Comma separated ONLY
-- No numbering, no bullets, no explanations
-- Each query must be 2-6 words
-- Must be highly diverse — cover all angles of this niche"""
+    # Two-pass approach: first pass = broad category, second pass = problems/features
+    prompt = (
+        'You are a Google Play Store ASO (App Store Optimization) expert.\n\n'
+        f'Task: Generate 200 search terms for the Android app category: "{base}"\n'
+        + (f'Additional context: {kw_prompt}\n' if kw_prompt else '') +
+        '\nIMPORTANT: These terms will be typed into Google Play Store search.\n'
+        'EVERY term you generate MUST return multiple real Android apps in search results.\n\n'
+        'STRICT RULES:\n'
+        '✅ DO: Use broad category words, common user problems, popular features\n'
+        '✅ DO: Use terms like "bitcoin tracker", "crypto portfolio", "send money app"\n'
+        '❌ NEVER: Use specific obscure coin/brand names (sibcoin, sexcoin, spaincoin etc)\n'
+        '❌ NEVER: Use terms that return 0 or very few apps on Play Store\n'
+        '❌ NEVER: Use made-up technical jargon\n\n'
+        'Generate exactly 200 comma-separated terms covering:\n'
+        '1. Core category synonyms (30)\n'
+        '2. User problems & pain points (40)\n'
+        '3. Desired app features (40)\n'
+        '4. Related adjacent categories (40)\n'
+        '5. User goals & actions (50)\n\n'
+        'Output: comma-separated terms ONLY. No numbers, no explanations, no bullets.'
+    )
 
     result = call_ai(prompt, max_tokens=3000)
-    if result:
-        terms = []
-        raw = result.replace('\n', ',').replace('\r', ',')
-        for t in raw.split(','):
-            t = re.sub(r'^\d+[\.\)\-\s]+', '', t)
-            t = t.replace('**','').replace('*','').replace('#','').strip()
-            # Remove obvious generic variations that don't work well
-            skip = False
-            for bad in [' pro', ' lite', ' free download', ' apk']:
-                if t.lower().endswith(bad): skip = True; break
-            if not skip and 4 < len(t) < 65 and t not in terms:
-                terms.append(t)
-        if len(terms) >= 30:
-            send(f"✅ AI generated {len(terms)} smart keywords.")
-            return terms[:200]
-        elif len(terms) >= 10:
-            # Supplement with fallback
-            fb = fallback_keywords(base)
-            combined = terms + [x for x in fb if x not in terms]
-            send(f"✅ AI+Fallback: {len(combined[:200])} keywords.")
-            return combined[:200]
+    terms = parse_ai_keywords(result) if result else []
 
-    send("⚠️ AI generation failed. Using smart fallback...")
+    # Filter out obviously bad terms (specific coin names pattern)
+    bad_patterns = ['coin', 'token', 'chain'] if len(base.split()) > 1 else []
+    base_words = set(base.lower().split())
+    filtered = []
+    for t in terms:
+        t_lower = t.lower()
+        # Skip if it's basically "base + random coin/brand name"
+        is_bad = False
+        for bp in bad_patterns:
+            if bp in t_lower and not any(w in t_lower for w in ['bitcoin','ethereum','crypto','blockchain']):
+                is_bad = True; break
+        if not is_bad:
+            filtered.append(t)
+
+    terms = filtered
+
+    if len(terms) >= 50:
+        send(f"✅ {len(terms)} keywords generated.")
+        return terms[:200]
+
+    # Supplement with fallback
     fb = fallback_keywords(base)
-    send(f"✅ Fallback generated {len(fb)} keywords.")
-    return fb
-
+    combined = terms + [x for x in fb if x not in terms]
+    if terms:
+        send(f"✅ AI+Fallback: {len(combined[:200])} keywords.")
+    else:
+        send(f"✅ Fallback: {len(fb)} keywords.")
+    return combined[:200]
 # ════════════════════════════════════════════════════════════
 #  SEARCH — smart per-keyword query (no generic templates)
 #  Rate limit protection: exponential backoff + cooldown tracking
 # ════════════════════════════════════════════════════════════
-COUNTRIES = ['us','in','gb','au','ca']
-_consecutive_empty = 0   # track how many searches returned 0 results in a row
+COUNTRIES = ['us', 'in', 'gb', 'au', 'ca']
+_consecutive_empty = 0
 
-def play_search_safe(query, country, n_hits=200):
-    """Single Play Store search with retry on rate-limit."""
+def play_search_safe(query, country, n_hits=250):
+    """Single Play Store search — retries on rate-limit, returns [] on error."""
     global _consecutive_empty
     for attempt in range(3):
         try:
             results = search(query, lang='en', country=country, n_hits=n_hits)
             if results:
                 _consecutive_empty = 0
-            return results
+            return results or []
         except Exception as e:
             err = str(e).lower()
-            if '429' in err or 'too many' in err or 'rate' in err:
+            if '429' in err or 'too many' in err or 'rate' in err or 'quota' in err:
                 wait = 30 * (attempt + 1)
-                print(f"[Search] Rate limit on '{query}' [{country}] — waiting {wait}s")
-                send(f"⏸️ Play Store rate limit — waiting {wait}s...")
+                print(f"[Search] Rate limit '{query}' [{country}] — wait {wait}s")
+                send(f"⏸️ Rate limit — cooling {wait}s...")
                 time.sleep(wait)
-                continue
             else:
                 print(f"[Search] Error '{query}' [{country}]: {e}")
                 return []
@@ -390,51 +404,51 @@ def play_search_safe(query, country, n_hits=200):
 
 def get_search_ids_for_keyword(kw):
     """
-    Search strategy:
-    - Use the keyword as-is (it's already a meaningful phrase from AI)
-    - Try 3 countries: us, in, gb
-    - If keyword is short (≤ 2 words), also try 2 variations
-    - Rate limit protection built-in
+    Search strategy per keyword:
+    - 2-4 smart query variations (based on word count)
+    - 3 countries: us, in, gb
+    - n_hits=250 per search
+    - Cooldown after 4 consecutive empty results
+    - Total: up to ~3000 raw IDs per keyword
     """
     global _consecutive_empty
 
-    # If too many consecutive empty results → take a longer break
-    if _consecutive_empty >= 5:
-        send(f"⏸️ Too many empty results in a row — cooling down 60s to avoid ban...")
-        time.sleep(60)
+    # If Play Store keeps returning empty → cool down
+    if _consecutive_empty >= 4:
+        send("⏸️ Rate limit suspected — cooling 90s...")
+        time.sleep(90)
         _consecutive_empty = 0
+
+    words = kw.split()
+
+    # Smart variations based on keyword length
+    if len(words) == 1:
+        queries = [kw, f"{kw} app", f"best {kw}", f"{kw} free"]
+    elif len(words) == 2:
+        queries = [kw, f"best {kw}", f"{kw} app", f"{kw} free"]
+    elif len(words) == 3:
+        queries = [kw, f"best {kw}", f"{' '.join(words[:2])} app"]
+    else:
+        # Long phrase: use as-is + first 2-3 words as shorter fallback
+        queries = [kw, ' '.join(words[:3]), ' '.join(words[:2])]
+
+    queries = list(dict.fromkeys(q.strip() for q in queries if q.strip()))
 
     raw_ids = []
-    queries = [kw]
-
-    # For short keywords, add ONE variation that opens more results
-    words = kw.split()
-    if len(words) <= 2:
-        queries.append(f"{kw} app")
-        queries.append(f"best {kw}")
-
-    search_countries = ['us', 'in', 'gb']   # 3 countries is enough per keyword
-
     for q in queries:
-        for country in search_countries:
+        for country in ['us', 'in', 'gb']:
             results = play_search_safe(q, country, n_hits=250)
-            for r in results:
-                raw_ids.append(r['appId'])
-            time.sleep(random.uniform(1.0, 2.0))   # respectful delay between searches
+            raw_ids.extend(r['appId'] for r in results)
+            time.sleep(random.uniform(0.7, 1.2))
 
-    if not raw_ids:
-        _consecutive_empty += 1
-    else:
-        _consecutive_empty = 0
+    _consecutive_empty = (_consecutive_empty + 1) if not raw_ids else 0
 
-    # Deduplicate and exclude already-seen
+    # Deduplicate and exclude already-scraped
     seen_kw, new_ids = set(), []
     for i in raw_ids:
         if i not in seen_kw and i not in state["scraped_ids"]:
-            seen_kw.add(i)
-            new_ids.append(i)
+            seen_kw.add(i); new_ids.append(i)
     return new_ids
-
 # ════════════════════════════════════════════════════════════
 #  FILTER
 #  Order: gov → no_email → dup → zero_rating → installs → rating
@@ -489,6 +503,8 @@ def save_qualified_lead(row):
 
 # ════════════════════════════════════════════════════════════
 #  PHASE 1 — SCRAPE
+#  Outer loop: keeps regenerating keywords until 100 leads found.
+#  Inner loop: processes all keywords in current batch.
 # ════════════════════════════════════════════════════════════
 def phase1_scrape():
     cid = state["chat_id"]
@@ -498,13 +514,15 @@ def phase1_scrape():
     state["status"]        = "SCRAPING"
     state["ai_working"]    = True
     state["ai_fail_count"] = 0
-    bot.send_message(cid, "🔄 Automation started. Use buttons below.", reply_markup=kb())
+    bot.send_message(cid, "🔄 Automation started.", reply_markup=kb())
 
     try:
         settings     = get_settings()
         max_installs = int(str(settings.get('max_installs','500000')).replace(',','').strip())
         max_rating   = float(str(settings.get('max_rating','4.8')).strip())
+        MIN_LEADS    = 100
 
+        # Load already-processed IDs and emails from Sheet
         try:
             existing = requests.post(SHEET_URL, json={"action":"get_scraped_ids"}, timeout=20).json()
             state["scraped_ids"] = set(existing) if isinstance(existing, list) else set()
@@ -517,153 +535,170 @@ def phase1_scrape():
         except:
             state["seen_emails"] = set()
 
+        # Get the next pending keyword set
         set_id, base_kw = get_next_keyword_set()
         if not set_id:
-            send("❌ No pending keyword sets. Add some first.")
+            send("❌ No pending keyword sets. Add some via 🔑 Keywords.")
             state["status"] = "IDLE"
             bot.send_message(cid, ".", reply_markup=kb()); return
 
         state["current_set_id"]  = set_id
         state["qualified_count"] = 0
+        state["total_scraped"]   = 0
         state["kw_stats"]        = {}
 
-        generated = generate_keywords_from_base(base_kw)
-        if not generated:
-            send("❌ No keywords generated. Aborting.")
-            state["status"] = "IDLE"
-            bot.send_message(cid, ".", reply_markup=kb()); return
+        relaxed = min(max_rating + 0.5, 4.9)
+        send(f"🎯 Target: *{MIN_LEADS} qualified leads* from keyword: *{base_kw}*\n"
+             f"Filter: rating ≤ {relaxed} | installs ≤ {max_installs:,}\n"
+             f"Already in DB: {len(state['scraped_ids'])} apps | {len(state['seen_emails'])} emails")
 
-        state["generated_kws"] = generated
-        state["kw_index"]      = 0
-        state["total_scraped"] = 0
+        round_num = 0
 
-        relaxed_rating = min(max_rating + 0.5, 4.9)
-        send(f"✅ Already in DB: *{len(state['scraped_ids'])}* apps\n"
-             f"Existing qualified emails: *{len(state['seen_emails'])}*\n"
-             f"Starting scrape with *{len(generated)}* keywords\n"
-             f"Filter settings:\n"
-             f"  • Max rating: ≤ {relaxed_rating} (relaxed from {max_rating})\n"
-             f"  • Max installs: ≤ {max_installs:,}\n"
-             f"  • Email required: ✅\n"
-             f"\n💡 To get more leads: increase max_rating or max_installs in Settings sheet.")
-
-        while state["kw_index"] < len(state["generated_kws"]):
+        # ── OUTER LOOP: repeat until 100 leads ─────────────────
+        while True:
             while state["status"] == "PAUSED": time.sleep(1)
             if state["status"] == "IDLE": return
 
-            kw = state["generated_kws"][state["kw_index"]]
-            send(f"🔍 *KW {state['kw_index']+1}/{len(state['generated_kws'])}:* `{kw}`")
+            round_num += 1
+            send(f"🔄 *Round {round_num}* — generating 200 keywords for '{base_kw}'...")
 
-            ids = get_search_ids_for_keyword(kw)
-            send(f"📦 *{len(ids)}* new apps found for `{kw}`")
+            keywords = generate_keywords_from_base(base_kw)
+            if not keywords:
+                send("❌ Keyword generation failed. Stopping.")
+                break
 
-            kw_count, qualified_from_kw = 0, 0
-            batch_raw    = []
-            filter_stats = {"gov":0,"zero_rating":0,"rating":0,"installs":0,"no_email":0,"dup":0,"passed":0}
+            state["generated_kws"] = keywords
+            state["kw_index"]      = 0
 
-            for app_id in ids:
+            # ── INNER LOOP: process each keyword ───────────────
+            while state["kw_index"] < len(state["generated_kws"]):
                 while state["status"] == "PAUSED": time.sleep(1)
-                if state["status"] == "IDLE": break
+                if state["status"] == "IDLE": return
 
-                state["scraped_ids"].add(app_id)
-                try:
-                    d = gplay(app_id, lang='en', country='us')
-                except:
+                kw    = state["generated_kws"][state["kw_index"]]
+                kw_no = state["kw_index"] + 1
+                total = len(state["generated_kws"])
+                send(f"🔍 *R{round_num} KW {kw_no}/{total}:* `{kw}`")
+
+                ids = get_search_ids_for_keyword(kw)
+
+                if not ids:
+                    send(f"⬛ 0 apps for `{kw}` — skipping")
+                    state["kw_index"] += 1
                     continue
 
-                email, esrc = get_email(d)
-                rating      = float(d.get('score') or 0.0)
-                raw_inst    = d.get('minInstalls') or d.get('realInstalls') or 0
-                installs    = int(raw_inst) if raw_inst else 0
+                send(f"📦 *{len(ids)}* new apps — processing...")
 
-                app_dict = {
-                    "app_id":       app_id,
-                    "app_name":     str(d.get('title','Unknown')),
-                    "dev_name":     str(d.get('developer','') or ''),
-                    "email":        email,
-                    "email_source": esrc,
-                    "rating":       rating,
-                    "installs":     installs,
-                    "genre":        str(d.get('genre','') or ''),
-                    "summary":      str(d.get('summary','') or ''),
-                    "description":  str(d.get('description','') or '')[:1000],
-                    "website":      str(d.get('developerWebsite','') or ''),
-                    "privacy":      str(d.get('privacyPolicy','') or ''),
-                    "link":         str(d.get('url','') or ''),
-                    "updated":      str(d.get('updated','') or ''),
-                    "keyword":      kw,
-                }
+                kw_count, qualified_from_kw = 0, 0
+                batch_raw    = []
+                fs = {"gov":0,"zero_rating":0,"rating":0,"installs":0,"no_email":0,"dup":0,"passed":0}
 
-                batch_raw.append(app_dict)
+                for app_id in ids:
+                    while state["status"] == "PAUSED": time.sleep(1)
+                    if state["status"] == "IDLE": break
 
-                qual, _ = is_qualified(app_dict, max_rating, max_installs, state["seen_emails"], filter_stats)
-                if qual:
-                    if save_qualified_lead(app_dict):
-                        state["seen_emails"].add(email)
-                        state["qualified_count"] += 1
-                        qualified_from_kw += 1
+                    state["scraped_ids"].add(app_id)
+                    try:
+                        d = gplay(app_id, lang='en', country='us')
+                    except:
+                        continue
 
-                kw_count               += 1
-                state["total_scraped"] += 1
+                    email, esrc = get_email(d)
+                    rating   = float(d.get('score') or 0.0)
+                    raw_inst = d.get('minInstalls') or d.get('realInstalls') or 0
+                    installs = int(raw_inst) if raw_inst else 0
 
-                if len(batch_raw) >= 50:
+                    app_dict = {
+                        "app_id":       app_id,
+                        "app_name":     str(d.get('title','Unknown')),
+                        "dev_name":     str(d.get('developer','') or ''),
+                        "email":        email,
+                        "email_source": esrc,
+                        "rating":       rating,
+                        "installs":     installs,
+                        "genre":        str(d.get('genre','') or ''),
+                        "summary":      str(d.get('summary','') or ''),
+                        "description":  str(d.get('description','') or '')[:1000],
+                        "website":      str(d.get('developerWebsite','') or ''),
+                        "privacy":      str(d.get('privacyPolicy','') or ''),
+                        "link":         str(d.get('url','') or ''),
+                        "updated":      str(d.get('updated','') or ''),
+                        "keyword":      kw,
+                    }
+                    batch_raw.append(app_dict)
+
+                    qual, _ = is_qualified(app_dict, max_rating, max_installs, state["seen_emails"], fs)
+                    if qual:
+                        if save_qualified_lead(app_dict):
+                            state["seen_emails"].add(email)
+                            state["qualified_count"] += 1
+                            qualified_from_kw += 1
+
+                    kw_count               += 1
+                    state["total_scraped"] += 1
+
+                    if len(batch_raw) >= 50:
+                        try:
+                            requests.post(SHEET_URL,
+                                json={"action":"save_raw_batch","rows":batch_raw}, timeout=30)
+                            batch_raw = []
+                        except: pass
+
+                    time.sleep(random.uniform(0.05, 0.12))
+
+                # Save remaining batch
+                if batch_raw:
                     try:
                         requests.post(SHEET_URL,
                             json={"action":"save_raw_batch","rows":batch_raw}, timeout=30)
-                        send(f"💾 Batch saved | Scraped: *{state['total_scraped']}* | Qualified: *{state['qualified_count']}*")
-                        batch_raw = []
-                    except Exception as e:
-                        print(f"Batch save error: {e}")
+                    except: pass
 
-                time.sleep(random.uniform(0.05, 0.15))
+                # Per-keyword summary
+                hint = ""
+                if fs['rating'] > 0 and fs['passed'] == 0 and kw_count > 0:
+                    hint = f" — 💡 {fs['rating']} dropped by rating (raise max_rating)"
+                elif fs['no_email'] > 0 and fs['passed'] == 0 and kw_count > 0:
+                    hint = f" — 💡 {fs['no_email']} had no email"
+                elif fs['installs'] > 0 and fs['passed'] == 0 and kw_count > 0:
+                    hint = f" — 💡 {fs['installs']} too popular (raise max_installs)"
 
-            if batch_raw:
-                try:
-                    requests.post(SHEET_URL,
-                        json={"action":"save_raw_batch","rows":batch_raw}, timeout=30)
-                except: pass
+                send(f"✅ `{kw}` — {kw_count} apps | {qualified_from_kw}✅{hint}\n"
+                     f"📊 NoEmail:{fs['no_email']} HighRating:{fs['rating']} HighInstalls:{fs['installs']} Dup:{fs['dup']} Passed:{fs['passed']}\n"
+                     f"Total: *{state['total_scraped']}* scraped | *{state['qualified_count']}/{MIN_LEADS}* qualified")
 
-            state["kw_stats"][kw] = {"apps": kw_count, "qualified": qualified_from_kw}
+                state["kw_index"] += 1
+            # ── end inner loop ──────────────────────────────────
 
-            # Build smart filter summary with suggestions
-            fs = filter_stats
-            total_dropped = fs['gov']+fs['zero_rating']+fs['rating']+fs['installs']+fs['no_email']+fs['dup']
-            hint = ""
-            if fs['rating'] > 0 and fs['passed'] == 0:
-                hint = f"\n💡 Tip: {fs['rating']} apps dropped by rating filter. Increase max_rating in Settings."
-            elif fs['no_email'] > 0 and fs['passed'] == 0:
-                hint = f"\n💡 Tip: {fs['no_email']} apps had no email. Try different keyword category."
-            elif fs['installs'] > 0 and fs['passed'] == 0:
-                hint = f"\n💡 Tip: {fs['installs']} apps too popular. Increase max_installs in Settings."
+            # After finishing all keywords in this round:
+            if state["status"] == "IDLE": return
 
-            send(f"✅ `{kw}` done — {kw_count} apps | {qualified_from_kw} qualified\n"
-                 f"📊 NoEmail:{fs['no_email']} Dup:{fs['dup']} ZeroRating:{fs['zero_rating']} "
-                 f"HighRating:{fs['rating']} HighInstalls:{fs['installs']} Gov:{fs['gov']} ✅Passed:{fs['passed']}"
-                 f"{hint}\n"
-                 f"Total: *{state['total_scraped']}* scraped | *{state['qualified_count']}* qualified")
+            if state["qualified_count"] >= MIN_LEADS:
+                send(f"🎉 *Target reached! {state['qualified_count']} qualified leads collected.*\n"
+                     f"Total scraped: *{state['total_scraped']}*")
+                break  # exit outer loop → proceed to email
 
-            state["kw_index"] += 1
+            else:
+                still_need = MIN_LEADS - state["qualified_count"]
+                send(f"⚠️ Round {round_num} done — only *{state['qualified_count']}* leads.\n"
+                     f"Need *{still_need}* more. Starting Round {round_num+1} with fresh keywords...")
+                # outer loop continues → generate new keywords
 
-        if state["status"] != "IDLE" and state["current_set_id"]:
+        # ── Done with scraping ──────────────────────────────────
+        if state["status"] == "IDLE": return
+
+        # Mark keyword set used
+        if state["current_set_id"]:
             mark_keyword_set_used(state["current_set_id"])
             state["current_set_id"] = None
-            send(f"🎉 *Phase 1 Complete!*\n"
-                 f"Total scraped: *{state['total_scraped']}*\n"
-                 f"Qualified leads: *{state['qualified_count']}*")
 
-            if state["status"] == "SCRAPING" and state["qualified_count"] > 0:
-                send("⏩ Auto-starting Phase 2 — sending emails...")
-                state["status"] = "EMAILING"
-                bot.send_message(cid, ".", reply_markup=kb())
-                threading.Thread(target=phase2_email_only, daemon=True).start()
-                return
-            elif state["qualified_count"] == 0:
-                send("⚠️ No qualified leads found.\n"
-                     "Tip: Increase max\\_installs or max\\_rating in Settings sheet.")
-                state["status"] = "IDLE"
-                bot.send_message(cid, ".", reply_markup=kb())
-
-        if state["status"] not in ["PAUSED","EMAILING"]:
+        if state["qualified_count"] > 0:
+            send(f"⏩ Starting email phase for *{state['qualified_count']}* leads...")
+            state["status"] = "EMAILING"
+            bot.send_message(cid, ".", reply_markup=kb())
+            threading.Thread(target=phase2_email_only, daemon=True).start()
+        else:
+            send("⚠️ No qualified leads after all rounds.\n"
+                 "Try: increase max_rating or max_installs in Settings sheet.")
             state["status"] = "IDLE"
             bot.send_message(cid, ".", reply_markup=kb())
 
@@ -672,7 +707,6 @@ def phase1_scrape():
         send(f"❌ Phase 1 Error: {e}")
         bot.send_message(cid, ".", reply_markup=kb())
 
-# ════════════════════════════════════════════════════════════
 #  PHASE 2 — EMAIL
 # ════════════════════════════════════════════════════════════
 def phase2_email_only():
