@@ -52,7 +52,13 @@ AI_MODEL = "llama-3.3-70b-versatile"
 # ════════════════════════════════════════════════════════════
 #  CORE AI CALL — retry on rate-limit, auto-disable on hard fail
 # ════════════════════════════════════════════════════════════
-def call_ai(prompt, max_tokens=2000, retries=2):
+def call_ai(prompt, max_tokens=2000, retries=2, silent_fallback=False):
+    """
+    silent_fallback=True  → used during email building:
+        rate limit = return None immediately (use fallback email, no waiting)
+    silent_fallback=False → used during keyword generation:
+        rate limit = wait and retry (we can afford to wait in background)
+    """
     for attempt in range(retries + 1):
         try:
             r = ai.chat.completions.create(
@@ -68,6 +74,10 @@ def call_ai(prompt, max_tokens=2000, retries=2):
             err = str(e)
             print(f"[AI] attempt {attempt+1}: {err[:150]}")
             if "rate_limit" in err or "429" in err:
+                if silent_fallback:
+                    # Email mode: don't wait, use fallback email immediately
+                    print("[AI] Rate limit during email — using fallback instantly")
+                    return None
                 wait = 20 * (attempt + 1)
                 send(f"⏳ AI rate limit — waiting {wait}s then retrying...")
                 time.sleep(wait)
@@ -80,7 +90,7 @@ def call_ai(prompt, max_tokens=2000, retries=2):
             else:
                 state["ai_fail_count"] += 1
                 if attempt < retries:
-                    time.sleep(5)
+                    time.sleep(3 if silent_fallback else 5)
                     continue
                 return None
     return None
@@ -741,7 +751,10 @@ def phase2_email_only():
                 sent_now  = int(sender.get('sent', 0)) + 1
                 limit     = int(sender.get('limit', 1))
                 remaining = max(0, limit - sent_now)
-                quota_str = f"{sent_now}/{limit} — {remaining} left" if remaining > 0 else f"{sent_now}/{limit} — LIMIT REACHED"
+                if remaining <= 0:
+                    quota_str = f"{sent_now}/{limit} — LIMIT REACHED, switching sender next"
+                else:
+                    quota_str = f"{sent_now}/{limit} — {remaining} left"
 
                 app_name_safe = str(row.get('app_name','?'))[:40]
                 send(f"✅ Email #{state['total_emailed']} sent\n"
@@ -886,7 +899,7 @@ Output — ONLY this exact format, nothing else:
 SUBJECT: [subject line]
 BODY: [email starting with Dear {dev_name},]"""
 
-    result = call_ai(prompt, max_tokens=600)
+    result = call_ai(prompt, max_tokens=600, silent_fallback=True)
 
     if result and "SUBJECT:" in result and "BODY:" in result:
         try:
