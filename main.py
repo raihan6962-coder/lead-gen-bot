@@ -674,13 +674,147 @@ def phase1_scrape():
 
 
 # ════════════════════════════════════════════════════════════
+#  EMAIL SEND HELPER — detects HTML responses, Gmail limit, retries
+# ════════════════════════════════════════════════════════════
+def _is_gmail_limit(resp):
+    """Detect Gmail daily limit error from Apps Script response."""
+    r = resp.lower()
+    return ("too many times" in r or "service invoked" in r or
+            "daily limit" in r or "quota exceeded" in r or
+            "limit exceeded" in r)
+
+def _is_html_response(resp):
+    """Detect if Apps Script returned HTML instead of Success (script error)."""
+    return resp.strip().startswith("<!") or "<html" in resp.lower()[:50]
+
+def _try_send_with_sender(sender, email, subject, body_html):
+    """
+    Attempt to send email via sender's Apps Script URL.
+    Returns: "success" | "gmail_limit" | "html_error" | "error:<msg>"
+    """
+    try:
+        r = requests.post(
+            sender['url'],
+            json={"action":"send_email","to":email,"subject":subject,"body":body_html},
+            timeout=30
+        )
+        resp = r.text.strip()
+    except Exception as e:
+        return f"error:Connection error: {e}"
+
+    if resp == "Success":
+        return "success"
+    elif _is_gmail_limit(resp):
+        return "gmail_limit"
+    elif _is_html_response(resp):
+        # HTML = Apps Script deployment issue or Google auth redirect
+        # Treat same as gmail_limit — skip this sender
+        return "html_error"
+    else:
+        return f"error:{resp[:80]}"
+
+def _exhaust_sender(sender_email):
+    """Mark sender as exhausted in Sheet so it won't be picked again today."""
+    try:
+        requests.post(SHEET_URL,
+            json={"action":"increment_sender","email":sender_email,"force_exhaust":True},
+            timeout=15)
+    except: pass
+
+def _get_next_sender(skip_email=None):
+    """Fetch fresh sender list and return first one with quota remaining."""
+    try:
+        senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
+        for s in senders:
+            try:
+                if skip_email and s.get('email') == skip_email: continue
+                if int(s.get('sent',0)) < int(s.get('limit',0)):
+                    return s, senders
+            except: continue
+        return None, senders
+    except:
+        return None, []
+
+def _send_email_with_fallback(row, email_prompt, cid):
+    """
+    Send one email. Tries each available sender until success or all exhausted.
+    Returns True if sent, False if all failed/skipped.
+    """
+    email = str(row.get('email',''))
+    esrc  = str(row.get('email_source','dev'))
+
+    # Get initial sender
+    sender, senders = _get_next_sender()
+    if not sender:
+        info = "⚠️ All senders hit daily limit!\n"
+        for s in senders:
+            info += f"📧 {s.get('email','')} — {s.get('sent',0)}/{s.get('limit',0)}\n"
+        send(info + "\nBot paused. Resume tomorrow.")
+        state["status"] = "PAUSED"
+        bot.send_message(cid, ".", reply_markup=kb())
+        return None  # None = all exhausted → stop loop
+
+    subject, body_html = build_clean_email(row, sender['email'], email_prompt)
+    tried = set()
+
+    while sender and state["status"] == "EMAILING":
+        tried.add(sender['email'])
+        result = _try_send_with_sender(sender, email, subject, body_html)
+
+        if result == "success":
+            # Record success
+            try:
+                requests.post(SHEET_URL, json={"action":"increment_sender","email":sender['email']}, timeout=15)
+                requests.post(SHEET_URL, json={"action":"mark_emailed","email":email}, timeout=15)
+            except: pass
+
+            state["total_emailed"] += 1
+            etag = {"dev":"📧","support":"📩","extracted":"📬"}.get(esrc,"📬")
+            sent_now  = int(sender.get('sent',0)) + 1
+            remaining = max(0, int(sender.get('limit',1)) - sent_now)
+            quota_str = (f"{sent_now}/{sender.get('limit','?')} — {remaining} left"
+                         if remaining > 0 else "LIMIT REACHED, switching next")
+            send(f"✅ Email #{state['total_emailed']} sent\n"
+                 f"App: {str(row.get('app_name','?'))[:35]}\n"
+                 f"{etag} To: {email}\n"
+                 f"Via: {sender['email']} ({quota_str})")
+            return True
+
+        elif result in ("gmail_limit", "html_error"):
+            reason = "Gmail daily limit" if result == "gmail_limit" else "Script deployment error"
+            send(f"🔄 {sender['email']} — {reason}. Switching sender...")
+            _exhaust_sender(sender['email'])
+            # Find next sender not yet tried
+            sender, senders = _get_next_sender(skip_email=None)
+            while sender and sender['email'] in tried:
+                tried.add(sender['email'])
+                _exhaust_sender(sender['email'])
+                sender, senders = _get_next_sender()
+
+            if not sender:
+                info = "⚠️ All senders exhausted!\n"
+                for s in senders:
+                    info += f"📧 {s.get('email','')} — {s.get('sent',0)}/{s.get('limit',0)}\n"
+                send(info + "\nBot paused. Resume tomorrow.")
+                state["status"] = "PAUSED"
+                bot.send_message(cid, ".", reply_markup=kb())
+                return None
+
+        else:
+            # Transient error — log and skip this email
+            send(f"❌ Skip {email}: {result[6:] if result.startswith('error:') else result}")
+            return False
+
+    return False
+
+# ════════════════════════════════════════════════════════════
 #  STANDALONE EMAIL SENDER
 #  Triggered by "📤 Send Emails" button.
 #  Sends to all pending leads from sheet, regardless of scrape state.
 #  Uses same logic as phase2 but independent — can stop anytime.
 # ════════════════════════════════════════════════════════════
 def phase2_send_pending():
-    """Send emails to all pending qualified leads from Sheet."""
+    """Send emails to all pending qualified leads. Uses _send_email_with_fallback."""
     cid = state["chat_id"]
     if not cid: return
 
@@ -688,7 +822,7 @@ def phase2_send_pending():
     bot.send_message(cid, ".", reply_markup=kb())
 
     try:
-        state["settings"] = {}  # fresh settings
+        state["settings"] = {}
         settings     = get_settings()
         email_prompt = settings.get('email_prompt','Write a professional cold outreach email.')
 
@@ -699,96 +833,29 @@ def phase2_send_pending():
             state["status"] = "IDLE"
             bot.send_message(cid, ".", reply_markup=kb()); return
 
-        send(f"📤 Found *{len(pending)}* pending leads. Starting email send.\n"
-             f"Press Stop to cancel anytime.")
+        send(f"📤 Found *{len(pending)}* pending leads — starting.\nPress Stop to cancel.")
         state["total_emailed"] = 0
 
         for row in pending:
             while state["status"] == "PAUSED": time.sleep(1)
-            if state["status"] == "IDLE": break  # Stop pressed
+            if state["status"] != "EMAILING": break
 
-            # Fresh sender pick each email
-            sender  = None
-            senders = []
-            try:
-                senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
-            except Exception as e:
-                print(f"Sender fetch error: {e}")
-                time.sleep(3); continue
+            result = _send_email_with_fallback(row, email_prompt, cid)
+            if result is None: break  # all senders exhausted → already paused
 
-            for s in senders:
-                try:
-                    if int(s.get('sent',0)) < int(s.get('limit',0)):
-                        sender = s; break
-                except: continue
-
-            if not sender:
-                info = "⚠️ All senders hit daily limit!\n"
-                for s in senders:
-                    info += f"📧 {s.get('email','')} — {s.get('sent',0)}/{s.get('limit',0)}\n"
-                info += "\nStopped. Resume tomorrow."
-                send(info)
-                state["status"] = "IDLE"
-                bot.send_message(cid, ".", reply_markup=kb()); break
-
-            email = str(row.get('email',''))
-            esrc  = str(row.get('email_source','dev'))
-            subject, body_html = build_clean_email(row, sender['email'], email_prompt)
-
-            try:
-                r2   = requests.post(sender['url'],
-                         json={"action":"send_email","to":email,"subject":subject,"body":body_html},
-                         timeout=30)
-                resp = r2.text.strip()
-            except Exception as se:
-                resp = f"Connection error: {se}"
-
-            if resp == "Success":
-                try:
-                    requests.post(SHEET_URL, json={"action":"increment_sender","email":sender['email']}, timeout=15)
-                    requests.post(SHEET_URL, json={"action":"mark_emailed","email":email}, timeout=15)
-                except: pass
-
-                state["total_emailed"] += 1
-                etag = {"dev":"📧","support":"📩","extracted":"📬"}.get(esrc,"📬")
-                sent_now  = int(sender.get('sent',0)) + 1
-                remaining = max(0, int(sender.get('limit',1)) - sent_now)
-                quota_str = f"{sent_now}/{sender.get('limit','?')} — {remaining} left" if remaining > 0 else f"LIMIT REACHED"
-
-                send(f"✅ Email #{state['total_emailed']} sent\n"
-                     f"App: {str(row.get('app_name','?'))[:35]}\n"
-                     f"{etag} To: {email}\n"
-                     f"Via: {sender['email']} ({quota_str})")
-
+            if result:  # sent successfully — wait before next
                 wait = random.randint(60, 120)
                 send(f"⏳ Waiting {wait}s...")
                 for _ in range(wait):
-                    if state["status"] not in ["EMAILING","PAUSED"]: break
+                    if state["status"] != "EMAILING": break
                     time.sleep(1)
 
-            else:
-                # Gmail limit hit → switch sender
-                gmail_limit = ("too many times" in resp.lower() or
-                               "service invoked" in resp.lower() or
-                               "daily limit" in resp.lower())
-                if gmail_limit:
-                    send(f"🔄 {sender['email']} hit Gmail limit — switching...")
-                    try:
-                        requests.post(SHEET_URL,
-                            json={"action":"increment_sender","email":sender['email'],"force_exhaust":True},
-                            timeout=15)
-                    except: pass
-                    # Re-queue this row by not marking it sent — next iteration will retry
-                    send(f"⚠️ Will retry {email} with next sender on next loop.")
-                else:
-                    send(f"❌ Skip {email}: {resp[:50]}")
-
         if state["status"] == "EMAILING":
-            send(f"🎉 Done! Sent *{state['total_emailed']}* emails.")
+            send(f"🎉 Done! Total sent: *{state['total_emailed']}*")
             state["status"] = "IDLE"
             bot.send_message(cid, ".", reply_markup=kb())
         elif state["status"] == "IDLE":
-            send(f"⏹️ Stopped. Sent *{state['total_emailed']}* emails so far.")
+            send(f"⏹️ Stopped. Sent *{state['total_emailed']}* emails.")
             bot.send_message(cid, ".", reply_markup=kb())
 
     except Exception as e:
@@ -819,171 +886,19 @@ def phase2_email_only():
 
         for row in pending:
             while state["status"] == "PAUSED": time.sleep(1)
-            if state["status"] == "IDLE": break
+            if state["status"] != "EMAILING": break
 
-            # ── Fetch fresh sender list each email — immediate switch when limit hit ──
-            sender  = None
-            senders = []
-            try:
-                senders = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
-            except Exception as e:
-                print(f"Error fetching senders: {e}")
-                time.sleep(3); continue
+            result = _send_email_with_fallback(row, email_prompt, cid)
+            if result is None: break  # all senders exhausted
 
-            for s in senders:
-                try:
-                    sent  = int(s.get('sent', 0))
-                    limit = int(s.get('limit', 0))
-                    if limit > 0 and sent < limit:
-                        sender = s
-                        break
-                except:
-                    continue
-
-            if not sender:
-                info = "⚠️ *All senders hit daily limit!*\n\n"
-                for s in senders:
-                    info += f"📧 `{s.get('email','')}` — {s.get('sent',0)}/{s.get('limit',0)} sent\n"
-                info += "\nBot paused. Resume tomorrow after limits reset."
-                send(info)
-                state["status"] = "PAUSED"
-                bot.send_message(cid, ".", reply_markup=kb()); break
-
-            email = str(row.get('email',''))
-            esrc  = str(row.get('email_source','dev'))
-
-            subject, body_html = build_clean_email(row, sender['email'], email_prompt)
-
-            try:
-                r2   = requests.post(sender['url'],
-                         json={"action":"send_email","to":email,"subject":subject,"body":body_html},
-                         timeout=30)
-                resp = r2.text.strip()
-            except Exception as se:
-                resp = f"Connection error: {se}"
-
-            if resp == "Success":
-                try:
-                    requests.post(SHEET_URL, json={"action":"increment_sender","email":sender['email']}, timeout=15)
-                    requests.post(SHEET_URL, json={"action":"mark_emailed","email":email}, timeout=15)
-                except Exception as e:
-                    print(f"Sheet update error: {e}")
-
-                state["total_emailed"] += 1
-                etag = {"dev":"📧","support":"📩","extracted":"📬"}.get(esrc,"📬")
-                sent_now  = int(sender.get('sent', 0)) + 1
-                limit     = int(sender.get('limit', 1))
-                remaining = max(0, limit - sent_now)
-                if remaining <= 0:
-                    quota_str = f"{sent_now}/{limit} — LIMIT REACHED, switching sender next"
-                else:
-                    quota_str = f"{sent_now}/{limit} — {remaining} left"
-
-                app_name_safe = str(row.get('app_name','?'))[:40]
-                send(f"✅ Email #{state['total_emailed']} sent\n"
-                     f"App: {app_name_safe}\n"
-                     f"{etag} To: {email}\n"
-                     f"Via: {sender['email']} ({quota_str})")
-
+            if result:  # sent successfully — wait
                 wait = random.randint(60, 120)
                 send(f"⏳ Waiting {wait}s before next...")
                 for _ in range(wait):
                     if state["status"] != "EMAILING": break
                     time.sleep(1)
 
-            else:
-                # Check if Gmail daily limit hit → switch sender immediately
-                gmail_limit_hit = (
-                    "too many times" in resp.lower() or
-                    "service invoked" in resp.lower() or
-                    "daily limit" in resp.lower() or
-                    "quota" in resp.lower()
-                )
 
-                if gmail_limit_hit:
-                    # Mark this sender as exhausted so we skip it next time
-                    send(f"🔄 Sender {sender['email']} hit Gmail limit — switching to next sender...")
-                    try:
-                        # Force-set sent = limit so it won't be picked again today
-                        requests.post(SHEET_URL,
-                            json={"action":"increment_sender","email":sender['email'],"force_exhaust":True},
-                            timeout=15)
-                    except: pass
-
-                    # Find next available sender right now
-                    next_sender = None
-                    try:
-                        fresh = requests.post(SHEET_URL, json={"action":"get_senders"}, timeout=15).json()
-                        for s2 in fresh:
-                            try:
-                                if s2['email'] == sender['email']: continue
-                                if int(s2.get('sent',0)) < int(s2.get('limit',0)):
-                                    next_sender = s2; break
-                            except: continue
-                    except: pass
-
-                    if next_sender:
-                        send(f"✅ Switched to {next_sender['email']} — retrying {email}...")
-                        try:
-                            r3 = requests.post(next_sender['url'],
-                                     json={"action":"send_email","to":email,
-                                           "subject":subject,"body":body_html},
-                                     timeout=30)
-                            resp3 = r3.text.strip()
-                        except Exception as _e3:
-                            resp3 = f"Connection error: {_e3}"
-
-                        if resp3 == "Success":
-                            try:
-                                requests.post(SHEET_URL, json={"action":"increment_sender","email":next_sender['email']}, timeout=15)
-                                requests.post(SHEET_URL, json={"action":"mark_emailed","email":email}, timeout=15)
-                            except: pass
-                            state["total_emailed"] += 1
-                            sent_now2  = int(next_sender.get('sent',0)) + 1
-                            remaining2 = max(0, int(next_sender.get('limit',1)) - sent_now2)
-                            send(f"✅ Email #{state['total_emailed']} sent via switched sender\n"
-                                 f"To: {email}\nVia: {next_sender['email']} ({sent_now2}/{next_sender.get('limit','?')} — {remaining2} left)")
-                            wait = random.randint(60, 120)
-                            send(f"⏳ Waiting {wait}s before next...")
-                            for _ in range(wait):
-                                if state["status"] != "EMAILING": break
-                                time.sleep(1)
-                        else:
-                            send(f"❌ Skipping {email} — switched sender also failed: {resp3[:60]}")
-                    else:
-                        # All senders exhausted
-                        info = "⚠️ All senders hit Gmail daily limit!\n\n"
-                        try:
-                            for s2 in fresh:
-                                info += f"📧 {s2.get('email','')} — {s2.get('sent',0)}/{s2.get('limit',0)} sent\n"
-                        except: pass
-                        info += "\nBot paused. Resume tomorrow after limits reset."
-                        send(info)
-                        state["status"] = "PAUSED"
-                        bot.send_message(cid, ".", reply_markup=kb()); break
-
-                else:
-                    # Transient error (not Gmail limit) — retry once with same sender
-                    send(f"⚠️ Failed for {email}: {resp[:60]}\nRetrying in 10s...")
-                    time.sleep(10)
-                    try:
-                        r3   = requests.post(sender['url'],
-                                 json={"action":"send_email","to":email,
-                                       "subject":subject,"body":body_html},
-                                 timeout=30)
-                        resp2 = r3.text.strip()
-                    except Exception as _e3:
-                        resp2 = f"Connection error: {_e3}"
-
-                    if resp2 == "Success":
-                        try:
-                            requests.post(SHEET_URL, json={"action":"increment_sender","email":sender['email']}, timeout=15)
-                            requests.post(SHEET_URL, json={"action":"mark_emailed","email":email}, timeout=15)
-                        except: pass
-                        state["total_emailed"] += 1
-                        send(f"✅ Email #{state['total_emailed']} sent (retry ok)\nTo: {email}")
-                    else:
-                        send(f"❌ Skipping {email} — both attempts failed: {resp2[:60]}")
 
         if state["status"] == "EMAILING":
             send(f"🎉 *Email Phase Complete!* Total sent: *{state['total_emailed']}*")
